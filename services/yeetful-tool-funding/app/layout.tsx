@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Yeetful Funding Planner MCP · Yeetful",
+  title: "Yeetful Finance MCP · Yeetful",
   description:
     "The universal funding planner over MCP — scan a wallet's movable ETH + USDC across Base/Arbitrum/Ethereum and turn any insufficient-funds refusal into an executable cross-chain funding plan (NEAR Intents legs, destination gas included). Free, construction-only, no API key required to call.",
 };
