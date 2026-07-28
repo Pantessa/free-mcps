@@ -163,3 +163,72 @@ describe("build_swap (real deposit transfer)", () => {
     await expect(buildSwap(args, { fetchImpl: f })).rejects.toThrow(/Amount too low/);
   });
 });
+
+describe("app fees", () => {
+  const args = {
+    originChain: "base",
+    originToken: "USDC",
+    destinationChain: "arbitrum",
+    destinationToken: "USDC",
+    amount: "0.55",
+    from: FROM,
+  };
+  const TREASURY = "0x9Cc0B7A0DdB091E17647d689206e730131E9892A";
+  // What 1Click echoes back for a 20bps request: halved between the caller
+  // and the protocol's own implicit account.
+  const SPLIT = [
+    { recipient: TREASURY, fee: 10 },
+    { recipient: "5880ad2b362620fadf759cbceb1cd5737ce8c6ed7fb8e9942881e6731f9247dd", fee: 10 },
+  ];
+
+  it("sends appFees on the quote and echoes the split 1Click applied", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false, appFees: SPLIT })));
+    const r = await buildSwap({ ...args, feeRecipient: TREASURY, feeBps: 20 }, { fetchImpl: f, readBalance: async () => 10_000_000n });
+
+    const body = bodyOf(callsOf(f).find((c) => c.url.includes("/v0/quote"))!);
+    expect(body.appFees).toEqual([{ recipient: TREASURY, fee: 20 }]);
+    // The deposit is untouched by the fee — it comes out of the OUTPUT.
+    expect(body.amount).toBe("550000");
+    expect(r.appFee!.requested).toEqual([{ recipient: TREASURY, fee: 20 }]);
+    expect(r.appFee!.applied).toEqual(SPLIT);
+    expect(r.appFee!.note).toMatch(/50\/50/);
+  });
+
+  it("prices previews with the same fee the build will charge", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: true, appFees: SPLIT })));
+    const r = await dryQuote({ ...args, feeRecipient: TREASURY, feeBps: 20 }, { fetchImpl: f });
+    expect(bodyOf(callsOf(f).find((c) => c.url.includes("/v0/quote"))!).appFees).toEqual([{ recipient: TREASURY, fee: 20 }]);
+    expect(r.appFee!.applied).toEqual(SPLIT);
+  });
+
+  it("omits appFees entirely when no fee is asked for", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    const r = await buildSwap(args, { fetchImpl: f, readBalance: async () => 10_000_000n });
+    expect(bodyOf(callsOf(f).find((c) => c.url.includes("/v0/quote"))!).appFees).toBeUndefined();
+    expect(r.appFee).toBeUndefined();
+  });
+
+  it("fails CLOSED on a malformed recipient — 1Click would charge it anyway", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    await expect(
+      buildSwap({ ...args, feeRecipient: "not-an-address", feeBps: 20 }, { fetchImpl: f }),
+    ).rejects.toThrow(/feeRecipient must be/);
+    // Nothing was quoted — the refusal happens before any network call.
+    expect(callsOf(f).some((c) => c.url.includes("/v0/quote"))).toBe(false);
+  });
+
+  it("refuses half a fee spec and an out-of-range rate", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    await expect(buildSwap({ ...args, feeBps: 20 }, { fetchImpl: f })).rejects.toThrow(/must be passed together/);
+    await expect(
+      buildSwap({ ...args, feeRecipient: TREASURY, feeBps: 900 }, { fetchImpl: f }),
+    ).rejects.toThrow(/between 0 and 500/);
+  });
+
+  it("treats feeBps 0 as no fee at all", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    const r = await buildSwap({ ...args, feeRecipient: TREASURY, feeBps: 0 }, { fetchImpl: f, readBalance: async () => 10_000_000n });
+    expect(bodyOf(callsOf(f).find((c) => c.url.includes("/v0/quote"))!).appFees).toBeUndefined();
+    expect(r.appFee).toBeUndefined();
+  });
+});

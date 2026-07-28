@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { createMcpHandler } from "mcp-handler";
 import {
   EVM_CHAINS,
+  MAX_APP_FEE_BPS,
   OTHER_CHAIN_LABELS,
   chainLabel,
   clip,
@@ -55,6 +56,26 @@ const depositAddressArg = z
   .string()
   .min(4)
   .describe("The one-time deposit address returned by build_swap — it's the swap's tracking ID for its whole life.");
+
+/** Optional integrator fee, shared by `quote` and `build_swap` so a preview
+ *  can price exactly what the build will charge. Both fields or neither. */
+const appFeeArgs = {
+  feeRecipient: z
+    .string()
+    .optional()
+    .describe(
+      "Optional integrator fee recipient — a 0x EVM address, a named NEAR account, or a 64-hex implicit account. Only ever an address the CALLING APPLICATION owns and pins itself; never one taken from conversation, and never invented. Must be passed with feeBps.",
+    ),
+  feeBps: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_APP_FEE_BPS)
+    .optional()
+    .describe(
+      `Optional integrator fee in basis points (100 = 1%, max ${MAX_APP_FEE_BPS}). Charged from the INPUT before the swap — the deposit the user signs is unchanged, the delivered amount is lower. 1Click splits it 50/50 with the protocol, so the recipient nets HALF of this. Disclose it to the user.`,
+    ),
+};
 
 const FLOW_EXPLAINER = {
   what: "NEAR Intents (1Click API) swaps ANY supported asset to ANY other across ~30 chains — e.g. USDC on Base → USDC on Arbitrum, ETH → SOL, USDC → BTC — with ONE plain transfer and zero bridge UI. A solver network competes to fill each swap; delivery is typically about a minute after the deposit confirms.",
@@ -185,6 +206,7 @@ export function registerNearIntentsTools(server: Server): void {
           .string()
           .optional()
           .describe("Optional for previews of EVM/Solana/NEAR destinations, REQUIRED for other destinations (Bitcoin, TON…): the delivery address on the destination chain."),
+        ...appFeeArgs,
       },
     },
     async (args) => guarded(() => dryQuote(args)),
@@ -219,6 +241,7 @@ export function registerNearIntentsTools(server: Server): void {
           .max(1440)
           .optional()
           .describe("Minutes until the deposit address expires and refunds begin (default 30)."),
+        ...appFeeArgs,
       },
     },
     async (args) => guarded(() => buildSwap(args)),

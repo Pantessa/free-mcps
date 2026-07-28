@@ -272,6 +272,47 @@ export function formatAtoms(atoms: bigint | string, decimals: number): string {
 
 // ── Quotes ───────────────────────────────────────────────────────────────────
 
+/** An integrator fee 1Click takes out of the INPUT before the swap (see
+ *  APP_FEE_NOTE). Never invented here — always passed in by the caller. */
+export interface AppFee {
+  /** Any NEAR-supported address: named account, implicit account, or 0x…. */
+  recipient: string;
+  /** Basis points, 0–500. 1Click splits this 50/50 with the protocol. */
+  fee: number;
+}
+
+/** The one paragraph every caller needs about app fees, so a fee is never a
+ *  surprise in a quote: it comes out of the OUTPUT (the deposit the user
+ *  signs is unchanged), and half of it goes to the 1Click protocol. */
+export const APP_FEE_NOTE =
+  "An app fee is charged from the input token BEFORE the swap: the deposit amount the user signs is unchanged, the delivered amount is lower by the fee. 1Click splits every app fee 50/50 — half to the requested recipient, half to the protocol — and echoes the resulting split back in quoteRequest.appFees.";
+
+export const MAX_APP_FEE_BPS = 500;
+
+/** Validate a caller-supplied fee. Returns null when none was asked for;
+ *  THROWS on a malformed one — 1Click accepts a garbage recipient and still
+ *  charges the fee (verified live 2026-07-28), so a typo would silently take
+ *  money out of the user's swap and send it nowhere. Fail closed. */
+export function validateAppFee(recipient?: string, bps?: number): AppFee[] | null {
+  if (recipient === undefined && bps === undefined) return null;
+  if (recipient === undefined || bps === undefined) {
+    throw new Error("feeRecipient and feeBps must be passed together (or neither).");
+  }
+  if (!Number.isInteger(bps) || bps < 0 || bps > MAX_APP_FEE_BPS) {
+    throw new Error(`feeBps must be an integer between 0 and ${MAX_APP_FEE_BPS} (basis points; 100 = 1%).`);
+  }
+  if (bps === 0) return null;
+  const named = /^[a-z0-9._-]+\.(near|testnet)$/i;
+  const implicit = /^[0-9a-f]{64}$/i;
+  const evm = /^0x[0-9a-fA-F]{40}$/;
+  if (!evm.test(recipient) && !named.test(recipient) && !implicit.test(recipient)) {
+    throw new Error(
+      "feeRecipient must be a 0x EVM address, a named NEAR account (alice.near), or a 64-hex implicit account — 1Click does NOT validate this, so a typo would burn the fee.",
+    );
+  }
+  return [{ recipient, fee: bps }];
+}
+
 export interface QuoteParams {
   dry: boolean;
   originAsset: OneClickToken;
@@ -282,6 +323,8 @@ export interface QuoteParams {
   refundTo: string;
   recipient: string;
   deadlineMin: number;
+  /** Optional integrator fee, already validated. */
+  appFees?: AppFee[] | null;
 }
 
 /** POST /v0/quote — EXACT_INPUT, origin-chain deposit, destination-chain delivery. */
@@ -304,6 +347,7 @@ export async function requestQuote(p: QuoteParams, opts?: OneClickOpts): Promise
         recipientType: "DESTINATION_CHAIN",
         deadline: new Date(Date.now() + p.deadlineMin * 60_000).toISOString(),
         referral: "yeetful",
+        ...(p.appFees?.length ? { appFees: p.appFees } : {}),
       },
     },
     opts,

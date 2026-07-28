@@ -10,6 +10,7 @@
 
 import { createPublicClient, encodeFunctionData, erc20Abi, http, type Chain } from "viem";
 import {
+  APP_FEE_NOTE,
   EVM_CHAINS,
   chainLabel,
   dryPlaceholderFor,
@@ -18,6 +19,7 @@ import {
   normalizeChain,
   requestQuote,
   resolveAsset,
+  validateAppFee,
   type OneClickOpts,
   type OneClickResult,
   type OneClickToken,
@@ -73,6 +75,10 @@ interface RawQuoteResponse {
   timestamp?: string;
   signature?: string;
   quote?: RawQuote;
+  /** 1Click echoes the request back, INCLUDING the app-fee split it applied
+   *  (the requested bps halved between recipient and protocol). Callers that
+   *  charge a fee verify their own recipient against this echo. */
+  quoteRequest?: { appFees?: Array<{ recipient?: string; fee?: number }> };
 }
 
 /** Human summary of a quote both dry and real paths share. */
@@ -130,10 +136,15 @@ export interface DryQuoteParams {
   slippageBps?: number;
   refundTo?: string;
   recipient?: string;
+  feeRecipient?: string;
+  feeBps?: number;
 }
 
 export async function dryQuote(p: DryQuoteParams, opts?: OneClickOpts) {
   const slippageBps = validateSlippage(p.slippageBps);
+  // Priced with the same fee the build will charge — a preview that omits it
+  // would quote a number the user can never actually receive.
+  const appFees = validateAppFee(p.feeRecipient, p.feeBps);
   const [origin, destination] = await Promise.all([
     resolveAsset(p.originChain, p.originToken, opts),
     resolveAsset(p.destinationChain, p.destinationToken, opts),
@@ -155,14 +166,15 @@ export async function dryQuote(p: DryQuoteParams, opts?: OneClickOpts) {
 
   const amountAtoms = humanToAtoms(p.amount, origin.decimals);
   const r = await requestQuote(
-    { dry: true, originAsset: origin, destinationAsset: destination, amountAtoms, slippageBps, refundTo, recipient, deadlineMin: DEFAULT_DEADLINE_MIN },
+    { dry: true, originAsset: origin, destinationAsset: destination, amountAtoms, slippageBps, refundTo, recipient, deadlineMin: DEFAULT_DEADLINE_MIN, appFees },
     opts,
   );
-  const { q } = unpackQuote(r);
+  const { resp, q } = unpackQuote(r);
 
   return {
     kind: "preview_quote",
     quote: presentQuote({ q, origin, destination, slippageBps }),
+    ...(appFees ? { appFee: { requested: appFees, applied: resp.quoteRequest?.appFees ?? null, note: APP_FEE_NOTE } } : {}),
     explain:
       "This is a DRY-RUN preview from the NEAR Intents solver network — nothing is committed and no deposit address exists yet. Cross-chain swaps here don't use a bridge UI: a real quote pins a one-time deposit address on the origin chain, the user sends ONE transfer to it, and solvers deliver the destination asset to the recipient automatically.",
     next_step: `To execute, call build_swap with the same pair plus from = the user's ${chainLabel(origin.blockchain)} wallet address ("$USER_ADDRESS" for the connected user)${EVM_CHAINS[destination.blockchain] ? " — proceeds go to the same address on the destination chain unless a different recipient is passed" : ` and recipient = the user's ${chainLabel(destination.blockchain)} address`}.`,
@@ -181,6 +193,9 @@ export interface BuildSwapParams {
   recipient?: string;
   slippageBps?: number;
   deadlineMinutes?: number;
+  /** Integrator fee recipient — passed together with feeBps or not at all. */
+  feeRecipient?: string;
+  feeBps?: number;
 }
 
 export async function buildSwap(p: BuildSwapParams, opts?: BuildOpts) {
@@ -221,9 +236,13 @@ export async function buildSwap(p: BuildSwapParams, opts?: BuildOpts) {
     throw new Error(`recipient must be a valid 0x address on ${chainLabel(destination.blockchain)}.`);
   }
 
+  // Throws on a malformed fee rather than quoting without one — see
+  // validateAppFee: 1Click charges a garbage recipient just the same.
+  const appFees = validateAppFee(p.feeRecipient, p.feeBps);
+
   const amountAtoms = humanToAtoms(p.amount, origin.decimals);
   const r = await requestQuote(
-    { dry: false, originAsset: origin, destinationAsset: destination, amountAtoms, slippageBps, refundTo: p.from, recipient, deadlineMin },
+    { dry: false, originAsset: origin, destinationAsset: destination, amountAtoms, slippageBps, refundTo: p.from, recipient, deadlineMin, appFees },
     opts,
   );
   const { resp, q } = unpackQuote(r);
@@ -287,6 +306,10 @@ export async function buildSwap(p: BuildSwapParams, opts?: BuildOpts) {
       deliveredTo: `${recipient} on ${chainLabel(destination.blockchain)}`,
     },
     balanceCheck,
+    // Verbatim echo of the split 1Click applied — the caller that asked for
+    // the fee checks its OWN recipient against this before offering the
+    // transaction, and it's what makes the fee disclosable to the user.
+    ...(appFees ? { appFee: { requested: appFees, applied: resp.quoteRequest?.appFees ?? null, note: APP_FEE_NOTE } } : {}),
     steps: [step],
     flow: [
       `1. NOW — the user signs the single "deposit" transaction below: a plain ${isNative ? "native" : origin.symbol} transfer of exactly ${q.amountInFormatted} ${origin.symbol} on ${evm.label} to 1Click's one-time deposit address. This is the ONLY signature the whole cross-chain swap needs.`,
