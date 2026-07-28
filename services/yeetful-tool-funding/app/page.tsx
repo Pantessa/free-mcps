@@ -10,7 +10,7 @@ const pre: React.CSSProperties = {
 export default function Home() {
   return (
     <main style={{ maxWidth: 720, margin: "0 auto", padding: "64px 24px", lineHeight: 1.6 }}>
-      <h1 style={{ fontSize: 28, marginBottom: 4 }}>Yeetful Funding Planner MCP</h1>
+      <h1 style={{ fontSize: 28, marginBottom: 4 }}>Yeetful Finance MCP</h1>
       <p style={{ color: "#8b93a7", marginTop: 0 }}>
         &quot;Insufficient funds&quot; is an offer, never a wall. When any
         action can&apos;t be funded — a stake, a supply, a deposit, a swap —
