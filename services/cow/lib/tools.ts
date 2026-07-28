@@ -36,8 +36,28 @@ type Server = Parameters<Parameters<typeof createMcpHandler>[0]>[0];
 
 const CHAIN_ENUM = ["mainnet", "gnosis", "arbitrum", "base", "avalanche", "polygon", "bnb", "sepolia"] as const;
 
-const chainArg = z
-  .enum(CHAIN_ENUM)
+// The describe below has PROMISED these aliases since day one, but the bare
+// z.enum rejected them — live 2026-07-28, a planner-routed build_swap_order
+// with chain "ethereum" failed -32602 twice in one chat. Normalize case and
+// map the aliases BEFORE the enum so the promise is real.
+const CHAIN_ALIASES: Record<string, (typeof CHAIN_ENUM)[number]> = {
+  ethereum: "mainnet",
+  eth: "mainnet",
+  xdai: "gnosis",
+  arbitrum_one: "arbitrum",
+  "arbitrum-one": "arbitrum",
+  matic: "polygon",
+  bsc: "bnb",
+  binance: "bnb",
+  avax: "avalanche",
+};
+
+export const chainValue = z.preprocess(
+  (v) => (typeof v === "string" ? (CHAIN_ALIASES[v.toLowerCase()] ?? v.toLowerCase()) : v),
+  z.enum(CHAIN_ENUM),
+);
+
+const chainArg = chainValue
   .optional()
   .describe('Chain (default "mainnet"). Aliases accepted: ethereum→mainnet, xdai→gnosis, arbitrum_one→arbitrum, matic→polygon, bsc→bnb, avax→avalanche.');
 
@@ -279,7 +299,7 @@ export function registerCowTools(server: Server): void {
         chains: z
           .preprocess(
             (v) => (typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean) : v),
-            z.array(z.enum(CHAIN_ENUM)).max(8).optional(),
+            z.array(chainValue).max(8).optional(),
           )
           .describe('Chains to scan, e.g. ["mainnet","base"] (or "mainnet,base"). Default: mainnet, gnosis, arbitrum, base.'),
       },
