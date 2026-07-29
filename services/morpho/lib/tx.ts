@@ -150,6 +150,136 @@ async function userPosition(m: LoadedMarket, user: Address) {
 const marketParamsArg = (p: MarketParams) =>
   ({ loanToken: p.loanToken, collateralToken: p.collateralToken, oracle: p.oracle, irm: p.irm, lltv: p.lltv }) as const;
 
+// ── Preview (local health-factor simulation — nothing built) ───────────────
+
+export type PreviewAction = "lend" | "supply_collateral" | "borrow" | "repay" | "withdraw" | "withdraw_collateral";
+
+export interface PreviewArgs {
+  chainId: SupportedChainId;
+  user: Address;
+  marketId: string;
+  action: PreviewAction;
+  amount: string; // decimal, or "max" for repay/withdraw/withdraw_collateral
+}
+
+const hfLabel = (hf: number | null) => (hf == null ? "∞ (no debt)" : String(hf));
+
+/**
+ * Simulate an action's effect on the position BEFORE building it: health
+ * factor now vs after, borrowing power after — computed locally from live
+ * on-chain state + the market oracle. Nothing is built or signed.
+ */
+export async function preview(args: PreviewArgs): Promise<MorphoResult> {
+  try {
+    const m = await loadMarket(args.chainId, args.marketId);
+    if (isResult(m)) return m;
+    const pos = await userPosition(m, args.user);
+
+    const max = args.amount === "max";
+    const maxable: PreviewAction[] = ["repay", "withdraw", "withdraw_collateral"];
+    if (max && !maxable.includes(args.action)) {
+      return fail(400, `"max" only applies to ${maxable.join("/")} — pass an explicit amount for ${args.action}.`);
+    }
+    const decimals = args.action === "supply_collateral" || args.action === "withdraw_collateral" ? m.collateral.decimals : m.loan.decimals;
+    const atoms = max
+      ? args.action === "repay"
+        ? pos.debt
+        : args.action === "withdraw"
+          ? pos.supplied
+          : pos.collateral
+      : humanToAtoms(args.amount, decimals);
+    if (atoms == null || (atoms === 0n && !max)) {
+      return fail(400, `Invalid amount "${args.amount}" — pass a positive decimal, or "max" for repay/withdraw/withdraw_collateral.`);
+    }
+
+    // The hypothetical position after the action.
+    let collateral = pos.collateral;
+    let debt = pos.debt;
+    let supplied = pos.supplied;
+    const warnings: string[] = [];
+    switch (args.action) {
+      case "lend":
+        supplied += atoms;
+        break;
+      case "withdraw":
+        if (atoms > pos.supplied) warnings.push(`Withdrawing more than the ${formatAtoms(pos.supplied, m.loan.decimals)} ${m.loan.symbol} supplied — build_withdraw would refuse.`);
+        supplied = supplied > atoms ? supplied - atoms : 0n;
+        break;
+      case "supply_collateral":
+        collateral += atoms;
+        break;
+      case "withdraw_collateral":
+        if (atoms > pos.collateral) warnings.push(`Withdrawing more than the ${formatAtoms(pos.collateral, m.collateral.decimals)} ${m.collateral.symbol} posted — build_withdraw_collateral would refuse.`);
+        collateral = collateral > atoms ? collateral - atoms : 0n;
+        break;
+      case "borrow":
+        debt += atoms;
+        break;
+      case "repay":
+        if (!max && atoms > pos.debt) warnings.push(`Repaying more than the ${formatAtoms(pos.debt, m.loan.decimals)} ${m.loan.symbol} owed — build_repay would refuse (use "max").`);
+        debt = debt > atoms ? debt - atoms : 0n;
+        break;
+    }
+
+    // One oracle read serves before AND after (unlike healthAfter, previews
+    // also want borrowing power at zero debt).
+    let price: bigint | null = null;
+    if (pos.collateral > 0n || collateral > 0n) {
+      price = await oraclePriceOf(args.chainId, m.params);
+      if (price == null) {
+        return fail(502, "The market's oracle returned no price — refusing to simulate health blind (builds against this market refuse too).");
+      }
+    }
+    const maxBorrowOf = (coll: bigint) => (price != null ? ((coll * price) / ORACLE_PRICE_SCALE) * m.params.lltv / WAD : 0n);
+    const hfOf = (coll: bigint, d: bigint) => (d > 0n ? Number((maxBorrowOf(coll) * 1000n) / d) / 1000 : null);
+    const hfBefore = hfOf(pos.collateral, pos.debt);
+    const hfAfter = hfOf(collateral, debt);
+    const maxBorrowAfter = maxBorrowOf(collateral);
+    if (hfAfter != null && hfAfter < 1) warnings.push("Health factor after would be UNDER 1 — the position would be liquidatable; the build tools refuse this.");
+    else if (hfAfter != null && hfAfter < 1.1) warnings.push("Health factor after is under 1.10 — a small price move could liquidate the collateral.");
+    if (args.action === "borrow" && debt > maxBorrowAfter) {
+      warnings.push("Exceeds the collateral's borrowing power — build_borrow would refuse.");
+    }
+
+    return ok({
+      operation: "preview",
+      chainId: args.chainId,
+      chain: m.chainName,
+      market: m.label,
+      marketId: m.id,
+      action: args.action,
+      amount: max ? "max" : args.amount,
+      position: {
+        before: {
+          supplied: `${formatAtoms(pos.supplied, m.loan.decimals)} ${m.loan.symbol}`,
+          collateral: `${formatAtoms(pos.collateral, m.collateral.decimals)} ${m.collateral.symbol}`,
+          debt: `${formatAtoms(pos.debt, m.loan.decimals)} ${m.loan.symbol}`,
+          healthFactor: hfLabel(hfBefore),
+        },
+        after: {
+          supplied: `${formatAtoms(supplied, m.loan.decimals)} ${m.loan.symbol}`,
+          collateral: `${formatAtoms(collateral, m.collateral.decimals)} ${m.collateral.symbol}`,
+          debt: `${formatAtoms(debt, m.loan.decimals)} ${m.loan.symbol}`,
+          healthFactor: hfLabel(hfAfter),
+          ...(collateral > 0n
+            ? {
+                borrowingPower: {
+                  maxBorrow: formatAtoms(maxBorrowAfter, m.loan.decimals),
+                  remaining: formatAtoms(maxBorrowAfter > debt ? maxBorrowAfter - debt : 0n, m.loan.decimals),
+                  asset: m.loan.symbol,
+                },
+              }
+            : {}),
+        },
+      },
+      ...(warnings.length ? { warnings } : {}),
+      note: "Simulation only — nothing was built or signed. Numbers come from live on-chain state and the market's oracle.",
+    });
+  } catch (e) {
+    return fail(502, `Preview failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 // ── Builders ───────────────────────────────────────────────────────────────
 
 export interface BuildArgs {

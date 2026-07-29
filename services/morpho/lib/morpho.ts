@@ -152,8 +152,12 @@ export function setFetchForTests(fake: FetchLike | null) {
   fetchImpl = fake ?? ((...args) => fetch(...args));
 }
 
+// Ordered by TVL desc — unlike 4663, Base/Ethereum carry THOUSANDS of
+// permissionless markets, so an unordered first-100 page would bury the
+// curated ones (live-observed: 3 listed markets on Base unordered vs 20+
+// ordered). The 100 biggest are also what position() scans by default.
 const marketsQuery = (chainId: SupportedChainId) =>
-  `query { markets(where: {chainId_in: [${chainId}]}, first: 100) { items { marketId listed lltv loanAsset { symbol address decimals } collateralAsset { symbol address decimals } state { supplyApy borrowApy utilization supplyAssetsUsd borrowAssetsUsd } } } }`;
+  `query { markets(where: {chainId_in: [${chainId}]}, orderBy: SupplyAssetsUsd, orderDirection: Desc, first: 100) { items { marketId listed lltv loanAsset { symbol address decimals } collateralAsset { symbol address decimals } state { supplyApy borrowApy utilization supplyAssetsUsd borrowAssetsUsd } } } }`;
 
 export async function fetchApiMarkets(chainId: SupportedChainId): Promise<ApiMarket[]> {
   const res = await fetchImpl(MORPHO_API, {
