@@ -28,6 +28,7 @@ fleet). Same architecture, same trust model, minus the 402:
 | `services/lido` | Lido liquid staking on Ethereum, read directly over RPC + Lido's public APIs: protocol stats with live APR, per-address position views (stETH/wstETH balances, staked value in ETH + USD), earnings history from Lido's reward backend (lifetime rewards, average APR, daily rebase events), withdrawal-queue tracking with wait estimates, and construction-only stake/wrap/unwrap/withdraw-request/claim transactions the USER signs | `stats`, `position`, `earnings`, `withdrawals`, `convert`, `build_stake`, `build_wrap`, `build_unwrap`, `build_request_withdrawal`, `build_claim` |
 | `services/near-intents` | Cross-chain swaps over the official NEAR Intents 1Click API (~190 assets, ~35 chains — USDC Base→Arbitrum, ETH→SOL, USDC→BTC…): dry-run quotes, then ONE unsigned deposit transfer the USER signs on any of 9 EVM origin chains; solvers deliver on the destination chain automatically, tracked to SUCCESS with explorer links. Every response narrates the flow step-by-step | `how_it_works`, `chains`, `tokens`, `quote`, `build_swap`, `submit_deposit_tx`, `check_status`, `await_completion` |
 | `services/yeetful-tool-wallet` | **Internal Yeetful tool** (the `yeetful-tool-*` naming marks first-party utility MCPs, vs protocol wrappers): multichain wallet reads via Alchemy (9 top EVM chains — Ethereum, Base, Arbitrum, Optimism, Polygon, BNB, Avalanche, Scroll, Gnosis): USD-priced whole-wallet portfolios (spam filtered, returns a structured payload the Yeetful chat renders as a rich card), gas balances, precise token balances, recent transfers w/ scam-symbol flagging, and tx confirmation status — the fresh-data layer after any swap/transfer settles | `chains`, `portfolio`, `gas_balances`, `token_balance`, `recent_transactions`, `transaction_status` |
+| `services/morpho` | Morpho (Blue) lending on Ethereum + Base against the canonical bytecode-verified singleton: market discovery with live supply/borrow APYs via the official Blue API (pinned on-chain fallback when it's down), per-address positions computed from on-chain state (supplied, collateral, debt with accrued interest, health factor), local health-factor previews, and construction-only lend/borrow/repay/withdraw transactions the USER signs — fails closed on balances, borrowing power, liquidity, and thin health factors | `markets`, `market_info`, `position`, `preview`, `build_lend`, `build_supply_collateral`, `build_borrow`, `build_repay`, `build_withdraw`, `build_withdraw_collateral` |
 
 ## Develop
 
@@ -51,6 +52,8 @@ to Lido's public APIs),
 works without it but 1Click then adds a 0.2% keyless fee per swap — and the
 API base, default https://1click.chaindefuser.com),
 `ALCHEMY_API_KEY` (yeetful-tool-wallet; REQUIRED — all reads go through Alchemy),
+`ETH_RPC_URL` / `BASE_RPC_URL` (morpho; optional — override the keyless
+publicnode defaults per chain),
 `RATE_LIMIT_PER_MINUTE` (default 60/IP).
 
 ## Shared kit
