@@ -1,0 +1,32 @@
+{
+  "name": "morpho-mcp-free",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Morpho (Blue) as a FREE (non-gated) MCP service on Ethereum + Base: market discovery with live APYs via the official Blue API, per-address positions computed from on-chain state (supplied, collateral, debt with accrued interest, health factor), local health-factor previews, and construction-only lend/borrow/repay/withdraw transactions encoded from the pinned singleton ABI. This service never signs or submits.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@yeetful/mcp-kit": "workspace:*",
+    "mcp-handler": "1.1.0",
+    "next": "16.2.7",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "viem": "^2.21.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}
