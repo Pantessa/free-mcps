@@ -1,7 +1,7 @@
 // The handoff contract — pure and edge-safe. An agent plans; a human signs.
 // This service NEVER returns transaction artifacts, calldata, typed data, or
-// deposit addresses to the calling agent: it returns a yeetful.com/sign link
-// that carries the ASK AS A SENTENCE. Yeetful's deterministic guarded
+// deposit addresses to the calling agent: it returns a pantessa.com/sign link
+// that carries the ASK AS A SENTENCE. Pantessa's deterministic guarded
 // builders rebuild the action from scratch on the other side of that link,
 // and the user's own wallet is the only thing that can sign it. Nothing an
 // agent can put in a link is executable by itself — that property is the
@@ -10,7 +10,14 @@
 const ASK_MAX = 400;
 const SLUG_RE = /^[a-z0-9-]{1,64}$/;
 
-export const SITE = (process.env.YEETFUL_SITE_URL ?? "https://yeetful.com").replace(/\/$/, "");
+// PANTESSA_SITE_URL is the current name; YEETFUL_SITE_URL is honored as a
+// back-compat fallback so existing deployments keep working through the
+// rebrand. Default is the canonical origin.
+export const SITE = (
+  process.env.PANTESSA_SITE_URL ??
+  process.env.YEETFUL_SITE_URL ??
+  "https://www.pantessa.com"
+).replace(/\/$/, "");
 
 /** Untrusted-input hygiene, mirrored from the website's /sign page. */
 export function cleanAsk(raw: string): string {
@@ -43,10 +50,10 @@ export function mintHandoff(rawAsk: string, opts: { agent?: string; mcps?: strin
     signUrl: `${SITE}/sign?${params.toString()}`,
     ask,
     contract:
-      "Give this link to your human. Yeetful rebuilds the ask from scratch with deterministic guarded builders (no AI writes calldata), prices and receipt-stamps the result, and their own wallet is the only thing that can sign it. This service returned no transaction material — a link like this cannot execute anything by itself.",
+      "Give this link to your human. Pantessa rebuilds the ask from scratch with deterministic guarded builders (no AI writes calldata), prices and receipt-stamps the result, and their own wallet is the only thing that can sign it. This service returned no transaction material — a link like this cannot execute anything by itself.",
     nextSteps: [
       "Show the human the ask you prepared and hand them the signUrl.",
-      "They review, the guarded build happens on yeetful.com, and they sign with their own wallet — or close the tab and nothing happens.",
+      "They review, the guarded build happens on pantessa.com, and they sign with their own wallet — or close the tab and nothing happens.",
       "Every signed move lands as a receipt they can share.",
     ],
   };
