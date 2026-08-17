@@ -5,7 +5,7 @@
 // the key's owner — the agent's OPERATOR, never the agent itself — so caps,
 // funnels, and creator earnings all land on a human's dashboard. Same
 // no-artifact property as /sign: the link carries the ask as a sentence and
-// Yeetful rebuilds it behind an explicit Connect & build consent step.
+// Pantessa rebuilds it behind an explicit Connect & build consent step.
 
 import { cleanAsk, SITE } from "./handoff";
 
@@ -48,10 +48,10 @@ export async function mintIntentLink(
   const ask = cleanAsk(rawAsk);
   if (ask.length < 8) throw new Error("The ask must be a plain sentence (at least 8 characters), amounts included.");
 
-  const apiKey = (opts.apiKey ?? process.env.YEETFUL_API_KEY ?? "").trim();
+  const apiKey = (opts.apiKey ?? process.env.PANTESSA_API_KEY ?? process.env.YEETFUL_API_KEY ?? "").trim();
   if (!KEY_RE.test(apiKey)) {
     throw new Error(
-      "Minting a durable intent link needs your operator's Yeetful API key (yf_…, from yeetful.com/dashboard). Pass it as api_key or set YEETFUL_API_KEY. For a one-shot handoff with no key, use prepare_handoff instead.",
+      "Minting a durable intent link needs your operator's Pantessa API key (yf_…, from pantessa.com/dashboard). Pass it as api_key or set PANTESSA_API_KEY (the legacy YEETFUL_API_KEY still works). For a one-shot handoff with no key, use prepare_handoff instead.",
     );
   }
 
@@ -87,7 +87,7 @@ export async function mintIntentLink(
     redirectUrl: body.redirectUrl ?? null,
     funnelUrl: `${SITE}/dashboard/links`,
     contract:
-      "The link is live and durable — share it anywhere. It carries the ask as a sentence only: whoever opens it faces an explicit Connect & build step, Yeetful's deterministic guarded builders rebuild the action from scratch, and the visitor's own wallet is the only signer. This call returned no transaction material.",
+      "The link is live and durable — share it anywhere. It carries the ask as a sentence only: whoever opens it faces an explicit Connect & build step, Pantessa's deterministic guarded builders rebuild the action from scratch, and the visitor's own wallet is the only signer. This call returned no transaction material.",
     nextSteps: [
       "Share the linkUrl — chat, site button, bio, anywhere.",
       "Your operator watches opens → connects → builds → signs (and conversion earnings) on the funnelUrl dashboard.",

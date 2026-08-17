@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Yeetful Hands MCP · Yeetful",
+  title: "Pantessa Hands MCP · Pantessa",
   description:
-    "The universal funding planner over MCP — scan a wallet's movable ETH + USDC across Base/Arbitrum/Ethereum and turn any insufficient-funds refusal into an executable cross-chain funding plan (NEAR Intents legs, destination gas included). Free, construction-only, no API key required to call.",
+    "Give your agent hands that can't steal: one MCP URL to scan a wallet's movable money, plan an action Pantessa can build (stock buys, swaps, recurring buys, stop-losses, staking, votes), and hand its human ONE sign link where the guarded build happens and their own wallet signs. Never returns calldata or artifacts. Free, construction-only.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
