@@ -6,7 +6,7 @@ Streamable HTTP (`/mcp`) + SSE (`/sse`). No API keys, no payment gate — just
 rate limiting.
 
 These are the free siblings of
-[x402-services](https://github.com/Yeetful/x402-services) (the x402-paid
+[x402-services](https://github.com/Pantessa/x402-services) (the x402-paid
 fleet). Same architecture, same trust model, minus the 402:
 
 - **Build, don't execute.** Services return quotes, data, and *buildable*
