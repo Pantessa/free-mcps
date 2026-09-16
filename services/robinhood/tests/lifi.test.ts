@@ -3,10 +3,10 @@
 // pools never touch LiFi; the honest refusal survives only when LiFi can't
 // route either. All network edges are faked — no live calls.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { decodeFunctionData } from "viem";
 import { setRpcForTests } from "@/lib/chain";
-import { PERMIT2, resolveToken } from "@/lib/registry";
+import { PERMIT2, UNIVERSAL_ROUTER, resolveToken } from "@/lib/registry";
 import {
   DEFAULT_LIFI_ROUTERS,
   DEFAULT_TREASURY,
@@ -17,8 +17,10 @@ import {
   type LifiQuote,
 } from "@/lib/lifi";
 import { swap } from "@/lib/swap";
+import { readSwapTape, setTapeFetchForTests } from "@/lib/tape";
 import type { SendTransactionAction } from "@/lib/tx";
 import { fakeClient, feedRound, type FakeCall, type FakeChainState } from "./fake-rpc";
+import { fakeTape } from "./fake-tape";
 import { humanToAtoms, formatAtoms } from "@/lib/util";
 
 const USER = "0x1111111111111111111111111111111111111111" as const;
@@ -82,9 +84,15 @@ function fakeLifi(response: LifiQuote | { status: number; body: unknown } | Erro
   return urls;
 }
 
+// The quoter fixture fills 500 USDG → 2 AAPL = $250 a share; the tape agrees.
+beforeEach(() => {
+  fakeTape({ robinhood: { AAPL: 250 } });
+});
+
 afterEach(() => {
   setRpcForTests(null);
   setLifiFetchForTests(null);
+  setTapeFetchForTests(null);
   delete process.env.YEETFUL_SWAP_FEE_BPS;
   delete process.env.YEETFUL_TREASURY;
   delete process.env.LIFI_ROUTERS;
@@ -131,6 +139,12 @@ describe("gated → LiFi fallthrough (via build_swap)", () => {
     expect(data.venue).toContain("LiFi");
     expect(data.steps).toHaveLength(3);
     expect(data.guard).toContain("passed");
+    // gated (not off tape): the v4 quote still referees LiFi, and the tape checks both
+    expect(res.data).toMatchObject({
+      priceCheck: { v4Quoter: "1.996 AAPL for the same input" },
+      tapeCheck: { status: "ok", venue: "Robinhood Chain's own settlement venue (via LiFi)", fillPerShare: "$250.75", minimum: "$252.02 a share (+0.81% vs the tape)" },
+    });
+    expect(data.guard).toContain("the v4 Quoter and the stock's tape");
     expect(new Date(data.validUntil).getTime()).toBeGreaterThan(Date.now());
     // quote went out for the swap leg (input minus fee), keylessly, tagged yeetful
     expect(urls[0]).toContain(`fromAmount=${SWAP_ATOMS}`);
@@ -210,8 +224,8 @@ describe("gated → LiFi fallthrough (via build_swap)", () => {
 });
 
 describe("the LiFi guard (fail-closed)", () => {
-  const build = () =>
-    buildLifiSwap({ user: USER, sell: USDG, buy: AAPL, amount: "500", amountIn: 500_000_000n, quoterOut: QUOTER_OUT });
+  const build = async () =>
+    buildLifiSwap({ user: USER, sell: USDG, buy: AAPL, amount: "500", amountIn: 500_000_000n, quoterOut: QUOTER_OUT, tape: await readSwapTape(USDG, AAPL) });
 
   it("refuses a transaction addressed to a non-allowlisted router", async () => {
     setRpcForTests(gatedFake());
@@ -231,7 +245,9 @@ describe("the LiFi guard (fail-closed)", () => {
 
   it("refuses a toAmount more than 2% below the service's own v4 Quoter read", async () => {
     setRpcForTests(gatedFake());
-    const bad = (18n * 10n ** 17n).toString(); // 1.8 AAPL vs 1.996 scaled quoter ≈ 10% worse
+    // 1.94 AAPL vs 1.996 scaled quoter ≈ 2.8% worse — still inside the tape's bound
+    // ($257.22 a share, +2.9%), so it's the quoter that refuses it
+    const bad = (194n * 10n ** 16n).toString();
     fakeLifi(lifiQuote({ estimate: { toAmount: bad, toAmountMin: bad, approvalAddress: ROUTER } }));
     const res = await build();
     expect(res.ok).toBe(false);
@@ -329,5 +345,124 @@ describe("pre-sign simulation", () => {
     const d = res.data as { simulation: string; warning?: string };
     expect(d.simulation).toContain("passed");
     expect(d.warning).toBeUndefined();
+  });
+});
+
+describe("tape parity: an off-tape pool falls through to LiFi", () => {
+  /** A near-empty pool, AMAT-style: 500 USDG buys 0.0151 AAPL ($33,112.58 a share) — and it executes directly. */
+  function brokenPoolFake(opts: { quoterOut?: bigint } = {}) {
+    return fakeClient({
+      reads: {
+        balanceOf: 1_000_000_000n,
+        allowance: (c: FakeCall) => (c.address.toLowerCase() === PERMIT2.toLowerCase() ? [0n, 0n, 0n] : 0n),
+        latestRoundData: () => feedRound(1),
+      },
+      simulations: {
+        quoteExactInputSingle: (c: FakeCall) => {
+          if ((c.args as [{ poolKey: { fee: number } }])[0].poolKey.fee === 10_000) return [opts.quoterOut ?? 151n * 10n ** 14n, 100_000n];
+          throw new Error("no pool");
+        },
+      },
+      // healthy probe: this pool WOULD fill a direct Universal Router swap
+      ethCall: () => {
+        throw Object.assign(new Error("execution reverted"), { data: "0x5212cba1" });
+      },
+    });
+  }
+  const POOL_SENTENCE =
+    "Robinhood Chain's Uniswap v4 pool fills this AAPL buy at $33,112.58 a share — 132× Robinhood's tape ($250.00), outside the 10% bound.";
+
+  it("skips an executable pool that's off the tape and builds through LiFi, refereed by the tape", async () => {
+    const fake = brokenPoolFake();
+    setRpcForTests(fake);
+    const urls = fakeLifi(lifiQuote());
+    const res = await swap.build({ user: USER, sellToken: "USDG", buyToken: "AAPL", amount: "500" });
+    expect(res.ok).toBe(true);
+    const data = res.data as { venue: string; note: string; steps: SendTransactionAction[]; guard: string };
+    expect(data.venue).toContain("LiFi");
+    expect(urls).toHaveLength(1);
+    expect(data.note).toContain(POOL_SENTENCE);
+    expect(res.data).toMatchObject({
+      priceCheck: {
+        v4Quoter: "not used — the Uniswap v4 pool's quote is 13,145% off the tape, so it can't referee LiFi's price",
+        verdict: "the stock's tape is the independent price reference (see tapeCheck)",
+      },
+      tapeCheck: { status: "ok", fillPerShare: "$250.75", deviation: "+0.30%" },
+    });
+    expect(data.guard).toContain("price cross-checked against the stock's tape");
+    // the broken pool was never probed, and nothing signable targets it
+    expect(fake.calls.some((c) => c.functionName === "eth_call")).toBe(false);
+    expect(data.steps.some((s) => s.tx.to.toLowerCase() === UNIVERSAL_ROUTER.toLowerCase())).toBe(false);
+  });
+
+  it("refuses by name when LiFi's fill is off the tape too — nothing built", async () => {
+    setRpcForTests(brokenPoolFake());
+    fakeLifi(lifiQuote({ estimate: { toAmount: (5n * 10n ** 17n).toString(), toAmountMin: (49n * 10n ** 16n).toString(), approvalAddress: ROUTER } }));
+    const res = await swap.build({ user: USER, sellToken: "USDG", buyToken: "AAPL", amount: "500" });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(409);
+    expect(res.data).toBe(
+      `${POOL_SENTENCE} Robinhood Chain's own settlement venue (via LiFi) fills this AAPL buy at $998.00 a share — 4.0× Robinhood's tape ($250.00), outside the 10% bound. Nothing was built.`,
+    );
+    expect(JSON.stringify(res.data)).not.toContain("steps");
+  });
+
+  it("refuses naming the off-tape pool when LiFi has no route", async () => {
+    setRpcForTests(brokenPoolFake());
+    fakeLifi({ status: 404, body: { message: "No available quotes for the requested transfer" } });
+    const res = await swap.build({ user: USER, sellToken: "USDG", buyToken: "AAPL", amount: "500" });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(409);
+    expect(res.data).toBe(`${POOL_SENTENCE} LiFi, the chain's own settlement venue, found no route either (No available quotes for the requested transfer). Nothing was built.`);
+  });
+
+  it("refuses when LiFi's minimum out sits off the tape, though its quote doesn't", async () => {
+    setRpcForTests(gatedFake());
+    fakeLifi(lifiQuote({ estimate: { toAmount: GOOD_TO_AMOUNT.toString(), toAmountMin: (10n ** 18n + 1n).toString(), approvalAddress: ROUTER } }));
+    const res = await swap.build({ user: USER, sellToken: "USDG", buyToken: "AAPL", amount: "500" });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(409);
+    expect(res.data).toContain("the minimum the transaction accepts works out to $499.00 a share");
+    expect(res.data).toContain("LiFi's own slippage sets that minimum.");
+  });
+
+  it("skips a pool whose minimum (the caller's slippage) would sign away a fill off the tape", async () => {
+    // healthy 2-AAPL quote, but slippageBps 1500 lets the minimum sit at $294.12 a share (+17.6%)
+    const fake = fakeClient({
+      reads: {
+        balanceOf: 1_000_000_000n,
+        allowance: (c: FakeCall) => (c.address.toLowerCase() === PERMIT2.toLowerCase() ? [0n, 0n, 0n] : 0n),
+        latestRoundData: () => feedRound(1),
+      },
+      simulations: { quoteExactInputSingle: quoterSim },
+      ethCall: () => {
+        throw Object.assign(new Error("execution reverted"), { data: "0x5212cba1" });
+      },
+    });
+    setRpcForTests(fake);
+    const urls = fakeLifi(lifiQuote());
+    const res = await swap.build({ user: USER, sellToken: "USDG", buyToken: "AAPL", amount: "500", slippageBps: 1500 });
+    expect(res.ok).toBe(true);
+    const data = res.data as { venue: string; note: string };
+    expect(urls).toHaveLength(1);
+    expect(data.venue).toContain("LiFi");
+    expect(data.note).toContain("the minimum the transaction accepts works out to $294.12 a share");
+    expect(data.note).toContain("slippageBps 1500");
+    // the quote itself was on the tape, so it still referees LiFi
+    expect(res.data).toMatchObject({ priceCheck: { v4Quoter: "1.996 AAPL for the same input" } });
+  });
+
+  it("refuses a LiFi stock build handed no tape, and a build with no price reference at all", async () => {
+    setRpcForTests(gatedFake());
+    const urls = fakeLifi(lifiQuote());
+    const noTape = await buildLifiSwap({ user: USER, sell: USDG, buy: AAPL, amount: "500", amountIn: 500_000_000n, quoterOut: QUOTER_OUT, tape: null });
+    expect(noTape.ok).toBe(false);
+    expect(noTape.data).toContain("wasn't checked against the tape");
+
+    const weth = resolveToken("WETH")!;
+    const noRef = await buildLifiSwap({ user: USER, sell: USDG, buy: weth, amount: "500", amountIn: 500_000_000n, quoterOut: null, tape: null });
+    expect(noRef.ok).toBe(false);
+    expect(noRef.data).toContain("no independent price reference");
+    expect(urls).toHaveLength(0);
   });
 });

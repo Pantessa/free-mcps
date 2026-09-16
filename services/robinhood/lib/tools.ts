@@ -234,7 +234,7 @@ export function registerRobinhoodTools(server: Server): void {
     {
       title: "Swap Quote (Uniswap v4)",
       description:
-        "Live Uniswap v4 quote on Robinhood Chain for any registry pair — tokenized stocks quote against USDG ('how much AAPL for 500 USDG?'). Scans the standard no-hook pools, best price wins, and cross-checks the pool against Chainlink with a divergence warning. To actually trade, build_swap prepares the signable chain (including for venue-gated stock pools, via LiFi).",
+        "Live Uniswap v4 quote on Robinhood Chain for any registry pair — tokenized stocks quote against USDG ('how much AAPL for 500 USDG?'). Scans the standard no-hook pools, best price wins. A stock pair is checked against Robinhood's 24/7 tape (Yahoo Finance as the fallback): tapeCheck gives the fill's per-share price, the tape, and the gap. A pool more than 10% off the tape comes back offTape with NO buy estimate — its number is not the stock's price, and build_swap won't fill there. No tape → the quote is marked unchecked. Pairs with no stock keep a Chainlink cross-check. To actually trade, build_swap prepares the signable chain (including for venue-gated stock pools, via LiFi).",
       inputSchema: {
         sellToken: tokenArg.describe('Token to sell — symbol or address, e.g. "USDG".'),
         buyToken: tokenArg.describe('Token to buy, e.g. "AAPL".'),
@@ -249,7 +249,7 @@ export function registerRobinhoodTools(server: Server): void {
     {
       title: "Build: Swap Stock Tokens",
       description:
-        "Prepare an UNSIGNED swap on Robinhood Chain — buy or sell tokenized stocks (AAPL, TSLA, NVDA, …) against USDG, or any quoted pair. Two settlement paths, picked automatically: pools that execute directly get ONE Universal Router Uniswap v4 swap (exact-amount Permit2 approvals only when live allowances are short); venue-gated stock pools — which only clear through Robinhood's backend-signed DexAggregator — build through LiFi's whitelisted router instead, with a 0.2% Yeetful fee as an explicit transfer step. Either way the build is re-decoded and guard-verified (pinned addresses, exact amounts, independent price check, simulation) before it's returned, and balances are checked first. 'Buy AAPL with 500 USDG' / 'buy 5 USDG of AAPL' — stock swaps ARE buildable here.",
+        "Prepare an UNSIGNED swap on Robinhood Chain — buy or sell tokenized stocks (AAPL, TSLA, NVDA, …) against USDG, or any quoted pair. Two settlement paths, picked automatically: pools that execute directly get ONE Universal Router Uniswap v4 swap (exact-amount Permit2 approvals only when live allowances are short); venue-gated stock pools — which only clear through Robinhood's backend-signed DexAggregator — build through LiFi's whitelisted router instead, with a 0.2% Yeetful fee as an explicit transfer step. Every stock fill is checked against Robinhood's 24/7 tape before anything is built: a pool whose quote — or whose minimum out at the chosen slippage — sits more than 10% off the tape, either side, is skipped for LiFi, whose fill must land inside the bound too, else the build is refused by name; no tape, no build. Either way the build is re-decoded and guard-verified (pinned addresses, exact amounts, independent price check, simulation) before it's returned, and balances are checked first. 'Buy AAPL with 500 USDG' / 'buy 5 USDG of AAPL' — stock swaps ARE buildable here.",
       inputSchema: {
         user: userArg,
         sellToken: tokenArg.describe("Token to sell."),

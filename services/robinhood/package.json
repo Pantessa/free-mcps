@@ -2,7 +2,7 @@
   "name": "robinhood-mcp-free",
   "version": "0.1.0",
   "private": true,
-  "description": "Robinhood Chain as a FREE (non-gated) MCP service: tokenized stocks & ETFs on chain 4663 — live Chainlink prices with corporate-action multipliers, whole-wallet portfolio views, Morpho lending/borrowing (markets, positions, health factor), Uniswap v4 stock-token swap quotes, and construction-only swap/lend/borrow/bridge transactions — stock swaps settle direct-v4 when executable and through LiFi's whitelisted router when the pool is venue-gated (0.2% Yeetful fee). This service never signs or submits.",
+  "description": "Robinhood Chain as a FREE (non-gated) MCP service: tokenized stocks & ETFs on chain 4663 — live Chainlink prices with corporate-action multipliers, whole-wallet portfolio views, Morpho lending/borrowing (markets, positions, health factor), Uniswap v4 stock-token swap quotes, and construction-only swap/lend/borrow/bridge transactions — stock swaps settle direct-v4 when executable and through LiFi's whitelisted router when the pool is venue-gated or off the stock's tape (0.2% Yeetful fee), and every stock fill is checked against Robinhood's 24/7 tape first. This service never signs or submits.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
