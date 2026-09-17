@@ -8,7 +8,8 @@
  * to be EMPTY on this chain, which also exercises the honest-refusal paths).
  * Verifies every registry pin: each token's decimals() on-chain, each
  * Chainlink feed's description() + freshness, Morpho market params, a live
- * v4 quote, and every build path (artifact or honest refusal).
+ * tape print for every stock/ETF, a live v4 quote checked against that tape,
+ * and every build path (artifact or honest refusal).
  */
 
 import { FEED_ABI, TOKEN_ABI, readRetry, rpc } from "../lib/chain";
@@ -17,6 +18,7 @@ import { morphoReads, marketParamsOf } from "../lib/morpho";
 import { reads } from "../lib/reads";
 import { FALLBACK_MARKET_IDS, TOKENS, USDG, resolveToken } from "../lib/registry";
 import { probeV4Executability, quoteBest, swap } from "../lib/swap";
+import { TAPE_MAX_AGE_MS, readStockTape, readSwapTape, swapLegOf } from "../lib/tape";
 import { builds, type SendTransactionAction } from "../lib/tx";
 import { humanToAtoms } from "../lib/util";
 
@@ -102,6 +104,18 @@ async function main() {
     return `$${d.price.usd} · uiMultiplier ${d.corporateActions?.uiMultiplier ?? "n/a"}`;
   });
 
+  console.log("\ntape parity (every stock/ETF must have a live price to check its pools against)");
+  await check("Robinhood 24/7 tape prices every registry stock/ETF (Yahoo fallback)", async () => {
+    const stocks = TOKENS.filter((t) => t.kind !== "money").map(swapLegOf);
+    const tape = await readStockTape(stocks.map((l) => l.priceSymbol!).filter(Boolean));
+    const missing = stocks.filter((l) => !l.priceSymbol || !tape.get(l.priceSymbol));
+    assert(missing.length === 0, `no tape for ${missing.map((l) => l.symbol).join(", ")}`);
+    const stale = stocks.filter((l) => Date.now() - tape.get(l.priceSymbol!)!.asOf > TAPE_MAX_AGE_MS);
+    assert(stale.length === 0, `stale tape for ${stale.map((l) => l.symbol).join(", ")}`);
+    const yahoo = stocks.filter((l) => tape.get(l.priceSymbol!)!.feed === "yahoo").map((l) => l.symbol);
+    return `${stocks.length} priced${yahoo.length ? ` (Yahoo fallback: ${yahoo.join(", ")})` : ", all from Robinhood"}`;
+  });
+
   console.log("\nMorpho");
   for (const id of FALLBACK_MARKET_IDS) {
     await check(`pinned market ${id.slice(0, 10)}… exists on-chain`, async () => {
@@ -126,11 +140,12 @@ async function main() {
   });
 
   console.log("\ntrading (Uniswap v4)");
-  await check("quote 100 USDG → AAPL", async () => {
+  await check("quote 100 USDG → AAPL (checked against the tape)", async () => {
     const res = (await swap.quote({ sellToken: "USDG", buyToken: "AAPL", amount: "100" })) as Result;
     assert(res.ok, String(res.data));
-    const d = res.data as { buy: string; pool: { fee: string }; feedCheck?: { divergence: string } };
-    return `${d.buy} @ pool ${d.pool.fee}${d.feedCheck ? `, ${d.feedCheck.divergence} off Chainlink` : ""}`;
+    const d = res.data as { buy?: string; poolQuote?: string; pool: { fee: string }; tapeCheck?: { status: string; deviation?: string; tape?: string; tapeFeed?: string } };
+    assert(d.tapeCheck && d.tapeCheck.status !== "unavailable", `no tape check on a stock quote: ${JSON.stringify(d.tapeCheck)}`);
+    return `${d.buy ?? d.poolQuote} @ pool ${d.pool.fee}, ${d.tapeCheck!.status} ${d.tapeCheck!.deviation} vs ${d.tapeCheck!.tape} (${d.tapeCheck!.tapeFeed})`;
   });
 
   await check("quote TSLA → USDG (sell side)", async () => {
@@ -167,6 +182,7 @@ async function main() {
         amount: "100",
         amountIn,
         quoterOut: best!.amountOut,
+        tape: await readSwapTape(resolveToken("USDG")!, buy!),
       })) as Result;
       assert(res.ok, String(res.data));
       const d = res.data as {
@@ -176,8 +192,10 @@ async function main() {
         simulation: string;
         validUntil: string;
         buyEstimate: string;
+        tapeCheck?: { status: string; deviation: string; minimum?: string };
       };
       assert(d.guard.includes("passed"), `guard did not pass: ${d.guard}`);
+      assert(d.tapeCheck && d.tapeCheck.minimum, `LiFi stock build carries no tape check: ${JSON.stringify(d.tapeCheck)}`);
       const { feeAtoms } = feeSplit(amountIn);
       assert(d.fee.amount === "0.2 USDG" && feeAtoms === 200_000n, `fee should be 0.2 USDG (20 bps of 100), got ${d.fee.amount}`);
       assert(d.steps.every((s) => s.action === "send_transaction" && s.tx.chainId === 4663 && s.tx.value === "0"), "bad step shape");
@@ -186,7 +204,7 @@ async function main() {
       assert(new Date(d.validUntil).getTime() > Date.now(), "validUntil already passed");
       // the balance-less probe holds no allowance → simulation must be skipped, flagged
       assert(d.simulation.includes("skipped"), `expected skipped simulation for the empty probe, got: ${d.simulation}`);
-      return `direct v4 probes ${gate}; ${d.steps.length} steps → ${d.buyEstimate}, fee ${d.fee.amount}, sim ${d.simulation.split(" — ")[0]}`;
+      return `direct v4 probes ${gate}; ${d.steps.length} steps → ${d.buyEstimate}, fee ${d.fee.amount}, tape ${d.tapeCheck!.status} ${d.tapeCheck!.deviation} (min ${d.tapeCheck!.minimum}), sim ${d.simulation.split(" — ")[0]}`;
     });
   }
 

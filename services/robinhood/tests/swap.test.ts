@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { decodeFunctionData } from "viem";
 import { UNIVERSAL_ROUTER_ABI, setRpcForTests } from "@/lib/chain";
 import { PERMIT2, UNIVERSAL_ROUTER, resolveToken } from "@/lib/registry";
 import { setLifiFetchForTests } from "@/lib/lifi";
 import { guardV4Build, probeV4Executability, swap, type V4SwapPlan } from "@/lib/swap";
+import { setTapeFetchForTests } from "@/lib/tape";
 import type { SendTransactionAction } from "@/lib/tx";
 import { fakeClient, feedRound, revertWithData, type FakeCall, type FakeChainState } from "./fake-rpc";
+import { fakeTape } from "./fake-tape";
 
 const USER = "0x1111111111111111111111111111111111111111" as const;
 const USDG = resolveToken("USDG")!;
@@ -19,8 +21,21 @@ const quoterSim = (c: FakeCall) => {
   throw new Error("no pool");
 };
 
+/** A near-empty pool, AMAT-style: 500 USDG buys 0.0151 AAPL ($33,112.58 a share). */
+const brokenQuoterSim = (c: FakeCall) => {
+  const params = (c.args as [{ poolKey: { fee: number } }])[0];
+  if (params.poolKey.fee === 10_000) return [151n * 10n ** 14n, 100_000n];
+  throw new Error("no pool");
+};
+
 function swapFake(
-  opts: { balance?: bigint; erc20Allowance?: bigint; permit2Allowance?: [bigint, bigint, bigint]; ethCall?: FakeChainState["ethCall"] } = {},
+  opts: {
+    balance?: bigint;
+    erc20Allowance?: bigint;
+    permit2Allowance?: [bigint, bigint, bigint];
+    ethCall?: FakeChainState["ethCall"];
+    quoter?: (c: FakeCall) => unknown;
+  } = {},
 ) {
   return fakeClient({
     reads: {
@@ -32,7 +47,7 @@ function swapFake(
       latestRoundData: (c: FakeCall) =>
         c.address.toLowerCase() === USDG.feed!.toLowerCase() ? feedRound(1) : feedRound(250),
     },
-    simulations: { quoteExactInputSingle: quoterSim },
+    simulations: { quoteExactInputSingle: opts.quoter ?? quoterSim },
     // Default probe answer: a HEALTHY pool — the SWAP action reverts WITH
     // data (CurrencyNotSettled-style), which means executable.
     ethCall:
@@ -43,22 +58,72 @@ function swapFake(
   });
 }
 
+// The quoter fixture fills 500 USDG → 2 AAPL = $250 a share; the tape agrees.
+beforeEach(() => {
+  fakeTape({ robinhood: { AAPL: 250 } });
+});
+
 afterEach(() => {
   setRpcForTests(null);
   setLifiFetchForTests(null);
+  setTapeFetchForTests(null);
 });
 
 describe("quote", () => {
-  it("scans the no-hook keys, picks the best pool, and cross-checks Chainlink", async () => {
+  it("scans the no-hook keys, picks the best pool, and checks a stock fill against the tape", async () => {
     setRpcForTests(swapFake());
     const res = await swap.quote({ sellToken: "USDG", buyToken: "AAPL", amount: "500" });
     expect(res.ok).toBe(true);
-    const data = res.data as { buy: string; pool: { fee: string }; feedCheck: { divergence: string; warning?: string } };
+    const data = res.data as { buy: string; pool: { fee: string }; tapeCheck: { status: string; fillPerShare: string; deviation: string }; feedCheck?: unknown; warning?: string };
     expect(data.buy).toContain("2 AAPL");
     expect(data.pool.fee).toBe("0.3%"); // best amountOut won, not first-hit
-    // exec 0.004 AAPL/USDG vs Chainlink 1/250 → 0% divergence, no warning
+    // 500 USDG for 2 AAPL = $250 a share vs a $250 tape
+    expect(data.tapeCheck).toMatchObject({ status: "ok", fillPerShare: "$250.00", deviation: "+0.00%" });
+    expect(data.feedCheck).toBeUndefined(); // the tape is the reference for a stock pair
+    expect(data.warning).toBeUndefined();
+  });
+
+  it("keeps the Chainlink cross-check for a pair with no stock, and never reads the tape", async () => {
+    const urls = fakeTape({});
+    setRpcForTests(
+      fakeClient({
+        reads: { latestRoundData: (c: FakeCall) => (c.address.toLowerCase() === USDG.feed!.toLowerCase() ? feedRound(1) : feedRound(2500)) },
+        simulations: { quoteExactInputSingle: () => [2_500_000_000n, 100_000n] }, // 1 WETH → 2,500 USDG
+      }),
+    );
+    const res = await swap.quote({ sellToken: "WETH", buyToken: "USDG", amount: "1" });
+    expect(res.ok).toBe(true);
+    const data = res.data as { feedCheck: { divergence: string }; tapeCheck?: unknown };
     expect(Number.parseFloat(data.feedCheck.divergence)).toBeLessThan(0.1);
-    expect(data.feedCheck.warning).toBeUndefined();
+    expect(data.tapeCheck).toBeUndefined();
+    expect(urls).toHaveLength(0);
+  });
+
+  it("never advertises an off-tape pool's number as the stock's price", async () => {
+    setRpcForTests(swapFake({ quoter: brokenQuoterSim }));
+    const res = await swap.quote({ sellToken: "USDG", buyToken: "AAPL", amount: "500" });
+    expect(res.ok).toBe(true);
+    const data = res.data as Record<string, unknown> & { tapeCheck: { status: string; note: string }; warning: string; poolQuote: string };
+    expect(data.offTape).toBe(true);
+    expect(data.buy).toBeUndefined();
+    expect(data.price).toBeUndefined();
+    expect(data.poolQuote).toContain("NOT a price you can trade at");
+    expect(data.tapeCheck.status).toBe("off");
+    expect(data.tapeCheck.note).toBe(
+      "Robinhood Chain's Uniswap v4 pool fills this AAPL buy at $33,112.58 a share — 132× Robinhood's tape ($250.00), outside the 10% bound.",
+    );
+    expect(data.warning).toContain("build_swap won't fill this pool");
+  });
+
+  it("marks a stock quote unchecked when the tape doesn't answer", async () => {
+    fakeTape({ robinhoodStatus: 503 });
+    setRpcForTests(swapFake());
+    const res = await swap.quote({ sellToken: "USDG", buyToken: "AAPL", amount: "500" });
+    expect(res.ok).toBe(true);
+    const data = res.data as { buy: string; tapeCheck: { status: string; note: string }; warning: string };
+    expect(data.buy).toContain("(unchecked)");
+    expect(data.tapeCheck).toEqual({ status: "unavailable", note: "Not checked against the tape: no AAPL quote from Robinhood's tape or Yahoo Finance." });
+    expect(data.warning).toContain("UNCHECKED");
   });
 
   it("404s a pair no pool quotes", async () => {
@@ -79,6 +144,14 @@ describe("build_swap", () => {
     expect(data.guard).toContain("passed");
     expect(data.minimumOut).toContain("1.98 AAPL"); // 2 AAPL − 1% default slippage
 
+    // the fill and the minimum it accepts are both checked against the tape
+    expect((res.data as { tapeCheck: unknown }).tapeCheck).toMatchObject({
+      status: "ok",
+      venue: "Robinhood Chain's Uniswap v4 pool",
+      fillPerShare: "$250.00",
+      minimum: "$252.53 a share (+1.01% vs the tape)",
+    });
+
     const swapStep = data.steps[2];
     expect(swapStep.tx.to.toLowerCase()).toBe(UNIVERSAL_ROUTER.toLowerCase());
     expect(swapStep.tx.value).toBe("0");
@@ -92,6 +165,42 @@ describe("build_swap", () => {
     setRpcForTests(swapFake({ erc20Allowance: 10n ** 12n, permit2Allowance: [10n ** 12n, future, 0n] }));
     const res = await swap.build({ user: USER, sellToken: "USDG", buyToken: "AAPL", amount: "500" });
     expect((res.data as { steps: unknown[] }).steps).toHaveLength(1);
+  });
+
+  it("builds nothing without a tape — no probe, no LiFi, no artifact", async () => {
+    fakeTape({ robinhoodStatus: 503 });
+    const fake = swapFake();
+    setRpcForTests(fake);
+    const lifiUrls: string[] = [];
+    setLifiFetchForTests(async (url) => {
+      lifiUrls.push(url);
+      throw new Error("LiFi must not be asked");
+    });
+    const res = await swap.build({ user: USER, sellToken: "USDG", buyToken: "AAPL", amount: "500" });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(503);
+    expect(res.data).toContain("try again in a moment");
+    expect(res.data).toContain("Nothing was built.");
+    expect(lifiUrls).toHaveLength(0);
+    expect(fake.calls.some((c) => c.functionName === "eth_call")).toBe(false);
+  });
+
+  it("builds a fill inside the warn band, with the gap named", async () => {
+    // only the 1% pool quotes: 500 USDG → 1.9 AAPL = $263.16 a share, +5.26%
+    setRpcForTests(
+      swapFake({
+        quoter: (c: FakeCall) => {
+          if ((c.args as [{ poolKey: { fee: number } }])[0].poolKey.fee === 10_000) return [19n * 10n ** 17n, 100_000n];
+          throw new Error("no pool");
+        },
+      }),
+    );
+    const res = await swap.build({ user: USER, sellToken: "USDG", buyToken: "AAPL", amount: "500" });
+    expect(res.ok).toBe(true);
+    const data = res.data as { venue: string; warning: string; tapeCheck: { status: string } };
+    expect(data.venue).toContain("Uniswap v4");
+    expect(data.tapeCheck.status).toBe("warn");
+    expect(data.warning).toBe("This AAPL buy fills at $263.16 a share, 5.26% above Robinhood's tape ($250.00) — inside the 10% bound, but a real gap.");
   });
 
   it("refuses over-balance honestly", async () => {

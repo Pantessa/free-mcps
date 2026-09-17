@@ -20,6 +20,9 @@
 //    3. INDEPENDENT PRICE CHECK — LiFi's toAmount is compared against the
 //       service's OWN v4 Quoter read for the same pair; more than ~2% worse
 //       (after LiFi's included fees) refuses. LiFi can't misprice us quietly.
+//       A stock's fill (and LiFi's minimum) is also checked against the tape
+//       (lib/tape.ts): more than 10% off refuses by name, and a v4 quote that
+//       is itself off the tape stops being the referee — the tape is.
 //    4. SIMULATION — the swap tx is eth_estimateGas-simulated before it's
 //       returned. A real revert fails CLOSED (no artifact); missing-approval
 //       or transport trouble fails OPEN with an explicit warning flag.
@@ -42,6 +45,19 @@
 import { decodeFunctionData, encodeFunctionData } from "viem";
 import { TOKEN_ABI, readRetry, rpc } from "./chain";
 import { CHAIN_ID, type Address, type RegistryToken } from "./registry";
+import {
+  LIFI_VENUE,
+  OffTapeError,
+  OffTapeMinimumError,
+  TAPE_BOUND_PCT,
+  checkFillAgainstTape,
+  checkMinimumAgainstTape,
+  fillDeviationPct,
+  fmtTapeGap,
+  isStockToken,
+  type SwapTape,
+  type TapeCheck,
+} from "./tape";
 import { step, type SendTransactionAction } from "./tx";
 import { fail, formatAtoms, ok, type RhResult } from "./util";
 
@@ -253,8 +269,15 @@ export interface LifiBuildArgs {
   amount: string;
   /** The asked amount in sell-token atoms. */
   amountIn: bigint;
-  /** Our OWN v4 Quoter amountOut for amountIn — the independent price anchor. */
-  quoterOut: bigint;
+  /** Our OWN v4 Quoter amountOut for amountIn — the independent price anchor.
+   *  Null when the v4 pool can't referee (its quote is off the stock's tape). */
+  quoterOut: bigint | null;
+  /** Both legs priced for the tape check (lib/tape.ts readSwapTape) — null
+   *  only for a pair with no stock on either side. */
+  tape: SwapTape | null;
+  /** Why build_swap skipped the Uniswap v4 pool when that pool was off the
+   *  tape — it leads any refusal from here. */
+  skippedPool?: OffTapeError | OffTapeMinimumError | null;
 }
 
 const pct = (n: bigint, d: bigint) => (d === 0n ? "0" : (Number((n * 10_000n) / d) / 100).toFixed(2));
@@ -268,6 +291,14 @@ const pct = (n: bigint, d: bigint) => (d === 0n ? "0" : (Number((n * 10_000n) / 
  */
 export async function buildLifiSwap(args: LifiBuildArgs): Promise<RhResult> {
   const { user, sell, buy } = args;
+  const skipped = args.skippedPool ?? null;
+  // Fail closed on a caller that skipped the tape for a stock pair.
+  if (!args.tape && (isStockToken(sell) || isStockToken(buy))) {
+    return fail(500, `Refusing to build a ${sell.symbol}→${buy.symbol} stock swap that wasn't checked against the tape. Nothing was built.`);
+  }
+  if (args.quoterOut === null && !args.tape) {
+    return fail(500, "LiFi guard refused (artifact withheld): no independent price reference — neither this service's v4 Quoter nor a tape.");
+  }
   const routers = lifiRouters();
   const treasury = yeetfulTreasury();
   const { feeAtoms, swapAtoms, bps } = feeSplit(args.amountIn);
@@ -275,12 +306,18 @@ export async function buildLifiSwap(args: LifiBuildArgs): Promise<RhResult> {
 
   const quoted = await fetchLifiQuote(sell.address, buy.address, swapAtoms, user);
   if (quoted.kind === "no-route") {
+    if (skipped) {
+      return fail(409, `${skipped.message} LiFi, the chain's own settlement venue, found no route either (${quoted.message}). Nothing was built.`);
+    }
     return fail(
       409,
       `${sell.symbol}→${buy.symbol} quotes on Uniswap v4, but the pool is venue-gated (it only executes through Robinhood Chain's backend-signed DexAggregator) and LiFi — the one public settlement path — found no route either: ${quoted.message} No artifact was built; trade this pair in Robinhood's own app instead. The quote tool stays accurate for pricing.`,
     );
   }
   if (quoted.kind === "transport") {
+    if (skipped) {
+      return fail(502, `${skipped.message} The LiFi settlement API was unreachable (${quoted.message}) — try again shortly. Nothing was built.`);
+    }
     return fail(502, `The pool is venue-gated and the LiFi settlement API was unreachable (${quoted.message}) — try again shortly. Nothing was built.`);
   }
   const q = quoted.quote;
@@ -313,16 +350,54 @@ export async function buildLifiSwap(args: LifiBuildArgs): Promise<RhResult> {
   }
   if (refusals.length > 0) return fail(500, `LiFi guard refused the quote (artifact withheld): ${refusals.join(" ")}`);
 
-  // ── Independent price check: our own v4 Quoter is the anchor ─────────────
-  // quoterOut priced the FULL asked amount; scale it to the swap leg.
-  const scaledQuoterOut = (args.quoterOut * swapAtoms) / args.amountIn;
-  const floor = (scaledQuoterOut * (10_000n - PRICE_TOLERANCE_BPS)) / 10_000n;
-  if (toAmount < floor) {
-    return fail(
-      409,
-      `LiFi priced ${sell.symbol}→${buy.symbol} at ${formatAtoms(toAmount, buy.decimals)} ${buy.symbol} — ${pct(scaledQuoterOut - toAmount, scaledQuoterOut)}% below this service's own Uniswap v4 Quoter read (${formatAtoms(scaledQuoterOut, buy.decimals)} ${buy.symbol}). More than ${Number(PRICE_TOLERANCE_BPS) / 100}% worse is refused — no artifact was built. Try again; routes and prices move.`,
-    );
+  // ── The tape: this is the last venue build_swap reaches, so a stock's fill
+  //   must sit inside the bound here too — the quote AND the minimum LiFi's
+  //   transaction accepts. Measured on the swap leg (the fee moves separately).
+  let tapeCheck: TapeCheck | null;
+  let minimumVsTape: string | null;
+  try {
+    tapeCheck = checkFillAgainstTape(args.tape, LIFI_VENUE, swapAtoms, toAmount);
+    minimumVsTape = checkMinimumAgainstTape(args.tape, LIFI_VENUE, swapAtoms, toAmountMin, "LiFi's own slippage sets that minimum.");
+  } catch (e) {
+    if (!(e instanceof OffTapeError || e instanceof OffTapeMinimumError)) throw e;
+    return fail(409, `${skipped ? `${skipped.message} ` : ""}${e.message} Nothing was built.`);
   }
+
+  // ── Independent price check: our own v4 Quoter is the anchor ─────────────
+  // A v4 quote that is itself off the stock's tape (a broken pool) can't
+  // referee LiFi's fill — the tape check above already did.
+  const refDevPct = args.quoterOut === null ? null : fillDeviationPct(args.tape, args.amountIn, args.quoterOut);
+  const referee = args.quoterOut !== null && (refDevPct === null || Math.abs(refDevPct) <= TAPE_BOUND_PCT) ? args.quoterOut : null;
+  // quoterOut priced the FULL asked amount; scale it to the swap leg.
+  const scaledQuoterOut = referee === null ? null : (referee * swapAtoms) / args.amountIn;
+  if (scaledQuoterOut !== null) {
+    const floor = (scaledQuoterOut * (10_000n - PRICE_TOLERANCE_BPS)) / 10_000n;
+    if (toAmount < floor) {
+      return fail(
+        409,
+        `LiFi priced ${sell.symbol}→${buy.symbol} at ${formatAtoms(toAmount, buy.decimals)} ${buy.symbol} — ${pct(scaledQuoterOut - toAmount, scaledQuoterOut)}% below this service's own Uniswap v4 Quoter read (${formatAtoms(scaledQuoterOut, buy.decimals)} ${buy.symbol}). More than ${Number(PRICE_TOLERANCE_BPS) / 100}% worse is refused — no artifact was built. Try again; routes and prices move.`,
+      );
+    }
+  }
+  const v4Gap =
+    skipped instanceof OffTapeError
+      ? skipped.fill.devPct
+      : refDevPct !== null && Math.abs(refDevPct) > TAPE_BOUND_PCT
+        ? refDevPct
+        : null;
+  const priceCheck =
+    scaledQuoterOut !== null
+      ? {
+          v4Quoter: `${formatAtoms(scaledQuoterOut, buy.decimals)} ${buy.symbol} for the same input`,
+          verdict: `LiFi within the ${Number(PRICE_TOLERANCE_BPS) / 100}% tolerance of this service's own quoter read`,
+        }
+      : {
+          v4Quoter:
+            v4Gap !== null && Number.isFinite(v4Gap)
+              ? `not used — the Uniswap v4 pool's quote is ${fmtTapeGap(v4Gap)}% off the tape, so it can't referee LiFi's price`
+              : "not used — the Uniswap v4 pool's quote is off the tape, so it can't referee LiFi's price",
+          verdict: "the stock's tape is the independent price reference (see tapeCheck)",
+        };
 
   try {
     const client = rpc();
@@ -394,11 +469,17 @@ export async function buildLifiSwap(args: LifiBuildArgs): Promise<RhResult> {
     }
 
     const validUntil = new Date(Date.now() + QUOTE_TTL_SEC * 1000).toISOString();
+    const warnings = [
+      ...(tapeCheck?.status === "warn" ? [tapeCheck.note] : []),
+      ...(simulationWarning ? [`Simulation ${hasApproval ? "was skipped" : "was unavailable"} — see the simulation field.`] : []),
+    ];
     return ok({
       operation: "swap",
       venue: `LiFi → Robinhood DexAggregator (Robinhood Chain)`,
       route: routeName,
-      note: "This pool is venue-gated for direct Uniswap v4 calls — only Robinhood's backend-signed DexAggregator settles it. LiFi's whitelisted router is the public path in; this build routes through it.",
+      note: skipped
+        ? `${skipped.message} build_swap skipped that pool; this build settles through LiFi's whitelisted router into Robinhood's backend-signed DexAggregator instead.`
+        : "This pool is venue-gated for direct Uniswap v4 calls — only Robinhood's backend-signed DexAggregator settles it. LiFi's whitelisted router is the public path in; this build routes through it.",
       sell: `${args.amount} ${sell.symbol} total (${swapHuman} swapped + ${feeHuman} fee)`,
       buyEstimate: `≈${outHuman} ${buy.symbol}`,
       minimumOut: `${minHuman} ${buy.symbol}`,
@@ -408,14 +489,14 @@ export async function buildLifiSwap(args: LifiBuildArgs): Promise<RhResult> {
         recipient: treasury,
         collection: "explicit ERC-20 transfer step (LiFi integrator fees are not available keylessly)",
       },
-      priceCheck: {
-        v4Quoter: `${formatAtoms(scaledQuoterOut, buy.decimals)} ${buy.symbol} for the same input`,
-        verdict: `LiFi within the ${Number(PRICE_TOLERANCE_BPS) / 100}% tolerance of this service's own quoter read`,
-      },
+      priceCheck,
+      ...(tapeCheck ? { tapeCheck: { ...tapeCheck, ...(minimumVsTape ? { minimum: minimumVsTape } : {}) } } : {}),
       simulation,
-      ...(simulationWarning ? { warning: `Simulation ${hasApproval ? "was skipped" : "was unavailable"} — see the simulation field.` } : {}),
+      ...(warnings.length > 0 ? { warning: warnings.join(" ") } : {}),
       validUntil,
-      guard: "passed — router + approval target pinned to the LiFi allowlist, amounts exact, fee transfer decoded and verified, price cross-checked against the v4 Quoter",
+      guard: `passed — router + approval target pinned to the LiFi allowlist, amounts exact, fee transfer decoded and verified, price cross-checked against ${
+        scaledQuoterOut !== null && tapeCheck ? "the v4 Quoter and the stock's tape" : tapeCheck ? "the stock's tape" : "the v4 Quoter"
+      }`,
       steps,
       submit_with: `Each step is an UNSIGNED transaction for the USER's wallet (eth_sendTransaction), in order — this service never signs. The LiFi quote goes stale at validUntil (${validUntil}); past that, call build_swap again for a fresh route. After the final step confirms, the ${buy.symbol} is in the wallet — check with portfolio.`,
     });

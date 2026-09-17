@@ -24,6 +24,12 @@
 //    5. GUARD: decode the calldata we just built and refuse unless every
 //       field verifies (pinned router, exact amounts, quoted pool key, no
 //       hooks, zero native value). A guard failure withholds the artifact.
+//    6. TAPE PARITY (lib/tape.ts): a stock swap's quoted fill is priced per
+//       share against Robinhood's tape BEFORE any of the above is trusted —
+//       every bound here is measured from the pool's own quote, so a broken
+//       pool would otherwise build a guard-verified swap that loses the money.
+//       More than 10% off (either side) skips the pool for LiFi, whose fill
+//       must land inside the bound too; no tape, no build.
 //  Only no-hook pools are scanned: a hooked pool's contract can reorder
 //  economics mid-swap, so we refuse rather than route through code we
 //  haven't verified.
@@ -34,6 +40,21 @@ import { PERMIT2_ABI, TOKEN_ABI, UNIVERSAL_ROUTER_ABI, V4_QUOTER_ABI, readRetry,
 import { CHAIN_ID, PERMIT2, UNIVERSAL_ROUTER, USDG, V4_QUOTER, resolveToken, type Address, type RegistryToken } from "./registry";
 import { buildLifiSwap } from "./lifi";
 import { feedPrice } from "./reads";
+import {
+  LIFI_VENUE,
+  OffTapeError,
+  OffTapeMinimumError,
+  TapeUnavailableError,
+  V4_VENUE,
+  checkFillAgainstTape,
+  checkMinimumAgainstTape,
+  isStockToken,
+  startSwapTape,
+  tapeCheckOf,
+  tapeFillOf,
+  type SwapTape,
+  type TapeCheck,
+} from "./tape";
 import { step, type SendTransactionAction } from "./tx";
 import { fail, formatAtoms, humanToAtoms, ok, type RhResult } from "./util";
 
@@ -343,14 +364,17 @@ function resolvePair(sellToken: string, buyToken: string): { sell: RegistryToken
 const isResult = (x: { sell: RegistryToken; buy: RegistryToken } | RhResult): x is RhResult => "ok" in x;
 
 export const swap = {
-  /** Live swap quote (no build): best no-hook v4 pool + Chainlink cross-check. */
+  /** Live swap quote (no build): best no-hook v4 pool, checked against the
+   *  stock's tape (stock pairs) or cross-checked against Chainlink (others). */
   async quote(args: { sellToken: string; buyToken: string; amount: string }): Promise<RhResult> {
     const pair = resolvePair(args.sellToken, args.buyToken);
     if (isResult(pair)) return pair;
     const { sell, buy } = pair;
     const amountIn = humanToAtoms(args.amount, sell.decimals);
     if (!amountIn || amountIn > UINT128_MAX) return fail(400, `Invalid amount "${args.amount}" — pass a positive decimal like "100".`);
+    const stockPair = isStockToken(sell) || isStockToken(buy);
     try {
+      const tapeRead = stockPair ? startSwapTape(sell, buy) : null;
       const best = await quoteBest(sell.address, buy.address, amountIn);
       if (!best) {
         return fail(
@@ -360,7 +384,58 @@ export const swap = {
       }
       const outHuman = formatAtoms(best.amountOut, buy.decimals);
       const execPrice = Number(outHuman) / Number(args.amount);
-      // Cross-check the pool against Chainlink when both sides have feeds.
+      const venue = "Uniswap v4 (Robinhood Chain)";
+      const pool = { fee: `${best.poolKey.fee / 10_000}%`, tickSpacing: best.poolKey.tickSpacing, hooks: "none" };
+      const note = "Quote only — build_swap prepares the signable transaction chain.";
+
+      if (tapeRead) {
+        // Stock pairs: the tape is the reference — the same check build_swap
+        // enforces, so a quote never advertises a price build_swap won't fill.
+        let tape: SwapTape | null = null;
+        try {
+          tape = await tapeRead;
+        } catch (e) {
+          if (!(e instanceof TapeUnavailableError)) throw e;
+          return ok({
+            venue,
+            sell: `${args.amount} ${sell.symbol}`,
+            buy: `≈${outHuman} ${buy.symbol} (unchecked)`,
+            pool,
+            tapeCheck: { status: "unavailable", note: `Not checked against the tape: ${e.detail}.` },
+            warning: e.permanent
+              ? `This pool's price can't be checked against a tape for ${e.symbol}, so build_swap refuses to build it.`
+              : "This pool's price is UNCHECKED — the tape didn't answer. Don't quote it as the stock's price; build_swap won't build until the tape answers.",
+            note,
+          });
+        }
+        const fill = tape ? tapeFillOf(V4_VENUE, tape.sell, tape.buy, amountIn, best.amountOut) : null;
+        const tapeCheck = fill ? tapeCheckOf(fill) : null;
+        if (tapeCheck?.status === "off") {
+          // Never advertise a broken pool's number as the stock's price.
+          return ok({
+            venue,
+            sell: `${args.amount} ${sell.symbol}`,
+            offTape: true,
+            poolQuote: `≈${outHuman} ${buy.symbol} — NOT a price you can trade at: this pool is off the tape`,
+            pool,
+            tapeCheck,
+            warning: `${tapeCheck.note} build_swap won't fill this pool — it tries ${LIFI_VENUE} instead, whose fill must land inside the bound too.`,
+            note,
+          });
+        }
+        return ok({
+          venue,
+          sell: `${args.amount} ${sell.symbol}`,
+          buy: `≈${outHuman} ${buy.symbol}`,
+          price: `1 ${sell.symbol} ≈ ${execPrice.toFixed(6)} ${buy.symbol}`,
+          pool,
+          ...(tapeCheck ? { tapeCheck } : {}),
+          ...(tapeCheck?.status === "warn" ? { warning: tapeCheck.note } : {}),
+          note,
+        });
+      }
+
+      // Non-stock pairs: cross-check the pool against Chainlink when both sides have feeds.
       let feedCheck: Record<string, unknown> | undefined;
       const [sellFeed, buyFeed] = await Promise.all([feedPrice(sell).catch(() => null), feedPrice(buy).catch(() => null)]);
       if (sellFeed && buyFeed) {
@@ -373,13 +448,13 @@ export const swap = {
         };
       }
       return ok({
-        venue: "Uniswap v4 (Robinhood Chain)",
+        venue,
         sell: `${args.amount} ${sell.symbol}`,
         buy: `≈${outHuman} ${buy.symbol}`,
         price: `1 ${sell.symbol} ≈ ${execPrice.toFixed(6)} ${buy.symbol}`,
-        pool: { fee: `${best.poolKey.fee / 10_000}%`, tickSpacing: best.poolKey.tickSpacing, hooks: "none" },
+        pool,
         ...(feedCheck ? { feedCheck } : {}),
-        note: "Quote only — build_swap prepares the signable transaction chain.",
+        note,
       });
     } catch (e) {
       return fail(502, `Quote failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -405,9 +480,32 @@ export const swap = {
         return fail(400, `Insufficient ${sell.symbol}: swapping ${args.amount} but the wallet holds ${formatAtoms(balance, sell.decimals)}. Nothing was built.`);
       }
 
+      // A stock swap is checked against the tape (lib/tape.ts); the read
+      // rides alongside the quote.
+      const tapeRead = startSwapTape(sell, buy);
       const best = await quoteBest(sell.address, buy.address, amountIn);
       if (!best) {
         return fail(404, `No Uniswap v4 pool quotes ${sell.symbol}→${buy.symbol} on Robinhood Chain — stock tokens pool against USDG; route through USDG in two swaps.`);
+      }
+      let tape: SwapTape | null;
+      try {
+        tape = await tapeRead;
+      } catch (e) {
+        // No tape, no build: a stock no feed prices refuses by name; a feed
+        // that didn't answer (or a stale print) is worth a retry.
+        if (e instanceof TapeUnavailableError) return fail(e.permanent ? 409 : 503, e.message);
+        throw e;
+      }
+      // Every bound below is measured from this pool's own quote, so a pool far
+      // from the stock's tape would still build a guard-verified swap that loses
+      // the money. Off tape → skip the pool: LiFi (the chain's own settlement
+      // venue) must fill inside the bound, refereed by the tape, not this pool.
+      let tapeCheck: TapeCheck | null;
+      try {
+        tapeCheck = checkFillAgainstTape(tape, V4_VENUE, amountIn, best.amountOut);
+      } catch (e) {
+        if (!(e instanceof OffTapeError)) throw e;
+        return buildLifiSwap({ user: args.user, sell, buy, amount: args.amount, amountIn, quoterOut: null, tape, skippedPool: e });
       }
       const minOut = (best.amountOut * BigInt(10_000 - slippageBps)) / 10_000n;
       if (minOut === 0n) return fail(400, "The quoted output rounds to zero — amount too small.");
@@ -427,7 +525,24 @@ export const swap = {
         args.user,
       );
       if (executability === "gated") {
-        return buildLifiSwap({ user: args.user, sell, buy, amount: args.amount, amountIn, quoterOut: best.amountOut });
+        return buildLifiSwap({ user: args.user, sell, buy, amount: args.amount, amountIn, quoterOut: best.amountOut, tape, skippedPool: null });
+      }
+
+      // The signature authorizes minOut, not the quote: with a caller-chosen
+      // slippage (up to 50%) a checked quote could still sign away a fill far
+      // off the tape. A minimum past the bound skips the pool for LiFi too.
+      let minimumVsTape: string | null;
+      try {
+        minimumVsTape = checkMinimumAgainstTape(
+          tape,
+          V4_VENUE,
+          amountIn,
+          minOut,
+          `The ${slippageBps / 100}% slippage (slippageBps ${slippageBps}) sets that minimum.`,
+        );
+      } catch (e) {
+        if (!(e instanceof OffTapeMinimumError)) throw e;
+        return buildLifiSwap({ user: args.user, sell, buy, amount: args.amount, amountIn, quoterOut: best.amountOut, tape, skippedPool: e });
       }
 
       const steps: SendTransactionAction[] = [];
@@ -484,7 +599,11 @@ export const swap = {
         minimumOut: `${minHuman} ${buy.symbol}`,
         pool: { fee: `${best.poolKey.fee / 10_000}%`, tickSpacing: best.poolKey.tickSpacing, hooks: "none" },
         deadline: new Date(deadline * 1000).toISOString(),
-        guard: "passed — calldata decoded and every field verified against the quote",
+        ...(tapeCheck ? { tapeCheck: { ...tapeCheck, ...(minimumVsTape ? { minimum: minimumVsTape } : {}) } } : {}),
+        ...(tapeCheck?.status === "warn" ? { warning: tapeCheck.note } : {}),
+        guard: tapeCheck
+          ? "passed — calldata decoded and every field verified against the quote; the quote and the minimum out both checked against the stock's tape"
+          : "passed — calldata decoded and every field verified against the quote",
         steps,
         submit_with: `Each step is an UNSIGNED transaction for the USER's wallet (eth_sendTransaction), in order — this service never signs. The quote expires at the deadline; if it passes, build again. After the final step confirms, the ${buy.symbol} is in the wallet — check with portfolio.`,
       });
