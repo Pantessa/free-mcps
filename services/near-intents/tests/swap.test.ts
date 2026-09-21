@@ -258,3 +258,58 @@ describe("app fees", () => {
     expect(r.appFee).toBeUndefined();
   });
 });
+
+describe("confidential swaps", () => {
+  const args = {
+    originChain: "base",
+    originToken: "USDC",
+    destinationChain: "arbitrum",
+    destinationToken: "USDC",
+    amount: "0.55",
+    from: FROM,
+  };
+  const OTHER = "0x1111111111111111111111111111111111111111";
+  const quoteBody = (f: typeof fetch) => bodyOf(callsOf(f).find((c) => c.url.includes("/v0/quote"))!);
+
+  it("sends the level, builds the SAME deposit, and says the payout is matchable when it returns to the payer", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false, confidentiality: "basic" })));
+    const r = await buildSwap({ ...args, confidentiality: "basic" }, { fetchImpl: f, readBalance: async () => 10_000_000n });
+    expect(quoteBody(f).confidentiality).toBe("basic");
+    expect(quoteBody(f).refundTo).toBe(FROM);
+    expect(r.deposit.address).toBe(DEPOSIT_ADDRESS);
+    expect(r.steps).toHaveLength(1);
+    expect(r.confidential).toMatchObject({ level: "basic", deliversToPayer: true });
+    expect(r.confidential!.note).toMatch(/different recipient/);
+  });
+
+  it("delivers to a separate recipient while refunds stay with the payer", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false, confidentiality: "advanced" })));
+    const r = await buildSwap({ ...args, recipient: OTHER, confidentiality: "advanced" }, { fetchImpl: f, readBalance: async () => 10_000_000n });
+    expect(quoteBody(f).recipient).toBe(OTHER);
+    expect(quoteBody(f).refundTo).toBe(FROM);
+    expect(r.confidential).toMatchObject({ level: "advanced", deliversToPayer: false });
+  });
+
+  it("refuses when the venue does not echo the level — a private ask never becomes a public swap", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    await expect(buildSwap({ ...args, confidentiality: "basic" }, { fetchImpl: f, readBalance: async () => 10_000_000n })).rejects.toThrow(/never falls back to a public swap/);
+  });
+
+  it("omits the field for public and absent, and refuses an unknown level before any quote", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    const r = await buildSwap({ ...args, confidentiality: "public" }, { fetchImpl: f, readBalance: async () => 10_000_000n });
+    expect(quoteBody(f).confidentiality).toBeUndefined();
+    expect(r.confidential).toBeUndefined();
+
+    const g = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    await expect(buildSwap({ ...args, confidentiality: "stealth" }, { fetchImpl: g })).rejects.toThrow(/must be one of/);
+    expect(callsOf(g).some((c) => c.url.includes("/v0/quote"))).toBe(false);
+  });
+
+  it("previews at the same level the build will use", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: true, confidentiality: "basic" })));
+    const r = await dryQuote({ ...args, confidentiality: "basic" }, { fetchImpl: f });
+    expect(quoteBody(f).confidentiality).toBe("basic");
+    expect(r.confidential!.level).toBe("basic");
+  });
+});

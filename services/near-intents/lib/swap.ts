@@ -11,6 +11,7 @@
 import { createPublicClient, encodeFunctionData, erc20Abi, http, type Chain } from "viem";
 import {
   APP_FEE_NOTE,
+  CONFIDENTIAL_NOTE,
   EVM_CHAINS,
   chainLabel,
   dryPlaceholderFor,
@@ -20,6 +21,8 @@ import {
   requestQuote,
   resolveAsset,
   validateAppFee,
+  validateConfidentiality,
+  type Confidentiality,
   type OneClickOpts,
   type OneClickResult,
   type OneClickToken,
@@ -78,7 +81,27 @@ interface RawQuoteResponse {
   /** 1Click echoes the request back, INCLUDING the app-fee split it applied
    *  (the requested bps halved between recipient and protocol). Callers that
    *  charge a fee verify their own recipient against this echo. */
-  quoteRequest?: { appFees?: Array<{ recipient?: string; fee?: number }> };
+  quoteRequest?: { appFees?: Array<{ recipient?: string; fee?: number }>; confidentiality?: string };
+}
+
+/** A confidential ask is only honored when 1Click ECHOES the level back. A
+ *  venue that dropped the field would hand back an ordinary public swap the
+ *  user believes is private — refuse instead. */
+function confidentialView(asked: Confidentiality | null, resp: RawQuoteResponse, samePayerAndRecipient: boolean) {
+  if (!asked) return {};
+  const echoed = resp.quoteRequest?.confidentiality;
+  if (echoed !== asked) {
+    throw new Error(
+      `Asked for a ${asked} confidential swap but the venue answered with "${echoed ?? "public"}" execution. Not built — a private ask never falls back to a public swap.`,
+    );
+  }
+  return {
+    confidential: {
+      level: asked,
+      deliversToPayer: samePayerAndRecipient,
+      note: CONFIDENTIAL_NOTE,
+    },
+  };
 }
 
 /** Human summary of a quote both dry and real paths share. */
@@ -138,6 +161,7 @@ export interface DryQuoteParams {
   recipient?: string;
   feeRecipient?: string;
   feeBps?: number;
+  confidentiality?: string;
 }
 
 export async function dryQuote(p: DryQuoteParams, opts?: OneClickOpts) {
@@ -145,6 +169,7 @@ export async function dryQuote(p: DryQuoteParams, opts?: OneClickOpts) {
   // Priced with the same fee the build will charge — a preview that omits it
   // would quote a number the user can never actually receive.
   const appFees = validateAppFee(p.feeRecipient, p.feeBps);
+  const confidentiality = validateConfidentiality(p.confidentiality);
   const [origin, destination] = await Promise.all([
     resolveAsset(p.originChain, p.originToken, opts),
     resolveAsset(p.destinationChain, p.destinationToken, opts),
@@ -166,7 +191,7 @@ export async function dryQuote(p: DryQuoteParams, opts?: OneClickOpts) {
 
   const amountAtoms = humanToAtoms(p.amount, origin.decimals);
   const r = await requestQuote(
-    { dry: true, originAsset: origin, destinationAsset: destination, amountAtoms, slippageBps, refundTo, recipient, deadlineMin: DEFAULT_DEADLINE_MIN, appFees },
+    { dry: true, originAsset: origin, destinationAsset: destination, amountAtoms, slippageBps, refundTo, recipient, deadlineMin: DEFAULT_DEADLINE_MIN, appFees, confidentiality },
     opts,
   );
   const { resp, q } = unpackQuote(r);
@@ -175,6 +200,7 @@ export async function dryQuote(p: DryQuoteParams, opts?: OneClickOpts) {
     kind: "preview_quote",
     quote: presentQuote({ q, origin, destination, slippageBps }),
     ...(appFees ? { appFee: { requested: appFees, applied: resp.quoteRequest?.appFees ?? null, note: APP_FEE_NOTE } } : {}),
+    ...confidentialView(confidentiality, resp, !p.recipient || p.recipient.toLowerCase() === (p.refundTo ?? "").toLowerCase()),
     explain:
       "This is a DRY-RUN preview from the NEAR Intents solver network — nothing is committed and no deposit address exists yet. Cross-chain swaps here don't use a bridge UI: a real quote pins a one-time deposit address on the origin chain, the user sends ONE transfer to it, and solvers deliver the destination asset to the recipient automatically.",
     next_step: `To execute, call build_swap with the same pair plus from = the user's ${chainLabel(origin.blockchain)} wallet address ("$USER_ADDRESS" for the connected user)${EVM_CHAINS[destination.blockchain] ? " — proceeds go to the same address on the destination chain unless a different recipient is passed" : ` and recipient = the user's ${chainLabel(destination.blockchain)} address`}.`,
@@ -196,6 +222,8 @@ export interface BuildSwapParams {
   /** Integrator fee recipient — passed together with feeBps or not at all. */
   feeRecipient?: string;
   feeBps?: number;
+  /** "basic" | "advanced" — NEAR Confidential Intents. Absent/"public" = the default lane. */
+  confidentiality?: string;
 }
 
 export async function buildSwap(p: BuildSwapParams, opts?: BuildOpts) {
@@ -239,13 +267,16 @@ export async function buildSwap(p: BuildSwapParams, opts?: BuildOpts) {
   // Throws on a malformed fee rather than quoting without one — see
   // validateAppFee: 1Click charges a garbage recipient just the same.
   const appFees = validateAppFee(p.feeRecipient, p.feeBps);
+  const confidentiality = validateConfidentiality(p.confidentiality);
 
   const amountAtoms = humanToAtoms(p.amount, origin.decimals);
   const r = await requestQuote(
-    { dry: false, originAsset: origin, destinationAsset: destination, amountAtoms, slippageBps, refundTo: p.from, recipient, deadlineMin, appFees },
+    { dry: false, originAsset: origin, destinationAsset: destination, amountAtoms, slippageBps, refundTo: p.from, recipient, deadlineMin, appFees, confidentiality },
     opts,
   );
   const { resp, q } = unpackQuote(r);
+  // Before anything signable exists: a private ask the venue didn't honor refuses.
+  const confidential = confidentialView(confidentiality, resp, recipient.toLowerCase() === p.from.toLowerCase());
   if (!q.depositAddress) throw new Error("1Click returned no deposit address — cannot build the transfer.");
   if (q.depositMemo) {
     // EVM origins are SIMPLE deposit mode; a memo would mean we'd build a
@@ -310,6 +341,7 @@ export async function buildSwap(p: BuildSwapParams, opts?: BuildOpts) {
     // the fee checks its OWN recipient against this before offering the
     // transaction, and it's what makes the fee disclosable to the user.
     ...(appFees ? { appFee: { requested: appFees, applied: resp.quoteRequest?.appFees ?? null, note: APP_FEE_NOTE } } : {}),
+    ...confidential,
     steps: [step],
     flow: [
       `1. NOW — the user signs the single "deposit" transaction below: a plain ${isNative ? "native" : origin.symbol} transfer of exactly ${q.amountInFormatted} ${origin.symbol} on ${evm.label} to 1Click's one-time deposit address. This is the ONLY signature the whole cross-chain swap needs.`,

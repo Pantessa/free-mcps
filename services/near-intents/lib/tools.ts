@@ -77,6 +77,14 @@ const appFeeArgs = {
     ),
 };
 
+/** NEAR Confidential Intents — shared by `quote` and `build_swap`. */
+const confidentialityArg = z
+  .enum(["public", "basic", "advanced"])
+  .optional()
+  .describe(
+    'Optional. "basic" or "advanced" runs the swap through NEAR Confidential Intents (a private shard): the route between the deposit and the payout stays off the public record, at the same speed and near-identical price. Only set it when the USER asked for a private/confidential swap. The deposit and the payout are still public transfers, so for real privacy the user should also give a `recipient` that is not the paying wallet — say so. Default "public".',
+  );
+
 const FLOW_EXPLAINER = {
   what: "NEAR Intents (1Click API) swaps ANY supported asset to ANY other across ~30 chains — e.g. USDC on Base → USDC on Arbitrum, ETH → SOL, USDC → BTC — with ONE plain transfer and zero bridge UI. A solver network competes to fill each swap; delivery is typically about a minute after the deposit confirms.",
   how_a_swap_works: [
@@ -209,6 +217,7 @@ export function registerNearIntentsTools(server: Server): void {
           .optional()
           .describe("Optional for previews of EVM/Solana/NEAR destinations, REQUIRED for other destinations (Bitcoin, TON…): the delivery address on the destination chain."),
         ...appFeeArgs,
+        confidentiality: confidentialityArg,
       },
     },
     async (args) => guarded(() => dryQuote(args)),
@@ -244,6 +253,7 @@ export function registerNearIntentsTools(server: Server): void {
           .optional()
           .describe("Minutes until the deposit address expires and refunds begin (default 30)."),
         ...appFeeArgs,
+        confidentiality: confidentialityArg,
       },
     },
     async (args) => guarded(() => buildSwap(args)),

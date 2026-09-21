@@ -87,13 +87,13 @@ export const TOKENS_FIXTURE = [
 
 export const DEPOSIT_ADDRESS = "0x76b4c56085ED136a8744D52bE956396624a730E8";
 
-export function quoteFixture(args: { dry: boolean; amountIn?: string; withMemo?: boolean; appFees?: Array<{ recipient: string; fee: number }> }) {
+export function quoteFixture(args: { dry: boolean; amountIn?: string; withMemo?: boolean; appFees?: Array<{ recipient: string; fee: number }>; confidentiality?: string }) {
   return {
     correlationId: "550e8400-e29b-41d4-a716-446655440000",
     timestamp: "2026-07-09T15:20:00.000Z",
     signature: "ed25519:sig-fixture",
     // 1Click echoes the request back with the app fee already split 50/50.
-    quoteRequest: args.appFees ? { appFees: args.appFees } : {},
+    quoteRequest: { ...(args.appFees ? { appFees: args.appFees } : {}), ...(args.confidentiality ? { confidentiality: args.confidentiality } : {}) },
     quote: {
       ...(args.dry ? {} : { depositAddress: DEPOSIT_ADDRESS, deadline: "2026-07-09T15:50:00.000Z" }),
       ...(args.withMemo ? { depositMemo: "1111111" } : {}),
