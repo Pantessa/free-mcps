@@ -107,7 +107,18 @@ import {
   polygon,
   scroll,
 } from "viem/chains";
-import type { Chain } from "viem";
+import { defineChain, type Chain } from "viem";
+
+// Robinhood Chain (4663, Arbitrum Orbit L2). viem ships no definition, so
+// this mirrors services/robinhood/lib/chain.ts: the id and public RPC are the
+// chain's own published values. 1Click's `blockchain` enum calls it "hood"
+// (live on the API since 2026-09-21).
+export const robinhoodChain = defineChain({
+  id: 4663,
+  name: "Robinhood Chain",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: { default: { http: [process.env.ROBINHOOD_RPC_URL || "https://rpc.mainnet.chain.robinhood.com"] } },
+});
 
 export const EVM_CHAINS: Record<string, { chain: Chain; label: string }> = {
   eth: { chain: mainnet, label: "Ethereum" },
@@ -119,6 +130,7 @@ export const EVM_CHAINS: Record<string, { chain: Chain; label: string }> = {
   avax: { chain: avalanche, label: "Avalanche" },
   gnosis: { chain: gnosis, label: "Gnosis" },
   scroll: { chain: scroll, label: "Scroll" },
+  hood: { chain: robinhoodChain, label: "Robinhood Chain" },
 };
 
 export const OTHER_CHAIN_LABELS: Record<string, string> = {
@@ -167,6 +179,9 @@ const CHAIN_ALIASES: Record<string, string> = {
   litecoin: "ltc",
   berachain: "bera",
   "x layer": "xlayer",
+  robinhood: "hood",
+  "robinhood chain": "hood",
+  robinhoodchain: "hood",
 };
 
 /** Normalize a user-supplied chain name to the 1Click `blockchain` enum. */

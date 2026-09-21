@@ -65,6 +65,24 @@ export const TOKENS_FIXTURE = [
     priceUpdatedAt: "2026-07-09T15:10:30.585Z",
     contractAddress: "0x2222222222222222222222222222222222222222",
   },
+  // Robinhood Chain ("hood") — the live 1Click rows, 2026-09-21.
+  {
+    assetId: "nep141:hood-0x5fc5360d0400a0fd4f2af552add042d716f1d168.omft.near",
+    decimals: 6,
+    blockchain: "hood",
+    symbol: "USDG",
+    price: 0.9999,
+    priceUpdatedAt: "2026-09-21T14:10:00.000Z",
+    contractAddress: "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+  },
+  {
+    assetId: "nep141:hood.omft.near",
+    decimals: 18,
+    blockchain: "hood",
+    symbol: "ETH",
+    price: 2723.19,
+    priceUpdatedAt: "2026-09-21T14:10:00.000Z",
+  },
 ];
 
 export const DEPOSIT_ADDRESS = "0x76b4c56085ED136a8744D52bE956396624a730E8";

@@ -545,7 +545,7 @@ export const builds = {
       ],
       when_not_to_use: [
         "Funding a stock buy? Don't hand-chain bridges — ask for the buy itself ('Buy $10 of AAPL') and Yeetful's funding planner builds LiFi legs from Base/Ethereum/Arbitrum USDC or ETH straight to USDG + gas on Robinhood Chain in SECONDS. This canonical bridge is the ETH-only, self-custody escape hatch (slow out), not the funding path.",
-        "Cross-chain swaps between majors (Base ↔ Arbitrum ↔ Ethereum ↔ Solana, …) belong to NEAR Intents — which can NOT reach Robinhood Chain at all. Robinhood Chain is reached ONLY via LiFi funding legs or this canonical bridge.",
+        "Cross-chain swaps between majors (Base ↔ Arbitrum ↔ Ethereum ↔ Solana, …) belong to NEAR Intents, which since 2026-09-21 also moves USDG into Robinhood Chain and USDG/ETH out of it (fast exits — no 7-day wait). It lists no stock tokens and has quoted no liquidity INTO gas ETH, so gas still arrives via LiFi funding legs or this canonical bridge.",
       ],
     });
   },
