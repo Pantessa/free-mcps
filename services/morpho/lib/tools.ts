@@ -138,7 +138,7 @@ export function registerMorphoTools(server: Server): void {
 
 function registerBuildTools(server: Server): void {
   const sharedNote =
-    "Returns UNSIGNED transaction step(s) {action:'send_transaction', tx:{to,data,value,chainId}} for the USER's wallet — an exact-amount ERC-20 approve step first when the live allowance is short. Balances and market health are checked before building. Nothing is signed or submitted by this service.";
+    "Returns UNSIGNED transaction step(s) {action:'send_transaction', tx:{to,data,value,chainId}} for the USER's wallet — an exact-amount ERC-20 approve step first when the live allowance is short (and, for Ethereum USDT with an older partial allowance, a reset-to-zero approve before it: USDT refuses to change a live allowance). Balances and market health are checked before building. Nothing is signed or submitted by this service.";
 
   server.registerTool(
     "build_lend",
