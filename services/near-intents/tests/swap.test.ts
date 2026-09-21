@@ -102,6 +102,32 @@ describe("build_swap (real deposit transfer)", () => {
     expect(r.receipt.correlationId).toBeTruthy();
   });
 
+  it("funds Robinhood Chain: Base USDC → USDG on hood, delivered to the payer", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    const r = await buildSwap(
+      { ...args, destinationChain: "robinhood chain", destinationToken: "USDG" },
+      { fetchImpl: f, readBalance: async () => 10_000_000n },
+    );
+    expect(r.steps[0].tx.chainId).toBe(8453);
+    const body = bodyOf(callsOf(f).find((c) => c.url.includes("/v0/quote"))!);
+    expect(body.destinationAsset).toBe("nep141:hood-0x5fc5360d0400a0fd4f2af552add042d716f1d168.omft.near");
+    expect(body.recipient).toBe(FROM); // hood is EVM — same address, no recipient needed
+    expect(body.refundTo).toBe(FROM);
+  });
+
+  it("leaves Robinhood Chain: USDG on hood → Base USDC is a deposit built on chain 4663", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false })));
+    const r = await buildSwap(
+      { originChain: "hood", originToken: "USDG", destinationChain: "base", destinationToken: "USDC", amount: "0.55", from: FROM },
+      { fetchImpl: f, readBalance: async () => 10_000_000n },
+    );
+    const step = r.steps[0];
+    expect(step.tx.chainId).toBe(4663);
+    expect(step.tx.to.toLowerCase()).toBe("0x5fc5360d0400a0fd4f2af552add042d716f1d168");
+    expect(step.tx.data.startsWith("0xa9059cbb")).toBe(true);
+    expect(step.tx.data.toLowerCase()).toContain(DEPOSIT_ADDRESS.slice(2).toLowerCase());
+  });
+
   it("builds a native-value transfer when the origin asset has no contract", async () => {
     const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({ dry: false, amountIn: "1500000000000000000" })));
     const r = await buildSwap(

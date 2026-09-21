@@ -22,6 +22,11 @@ describe("chain normalization", () => {
     expect(normalizeChain("42161")).toBe("arb");
     expect(normalizeChain("Solana")).toBe("sol");
     expect(normalizeChain("polygon")).toBe("pol");
+    // Robinhood Chain: 1Click calls it "hood" (live 2026-09-21).
+    expect(normalizeChain("Robinhood Chain")).toBe("hood");
+    expect(normalizeChain("robinhood")).toBe("hood");
+    expect(normalizeChain("hood")).toBe("hood");
+    expect(normalizeChain("4663")).toBe("hood");
   });
 
   it("rejects unknown chains with the supported list", () => {

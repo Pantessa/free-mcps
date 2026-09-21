@@ -25,6 +25,7 @@ const EXPLORER_TX: Record<string, string> = {
   avax: "https://snowtrace.io/tx/",
   gnosis: "https://gnosisscan.io/tx/",
   scroll: "https://scrollscan.com/tx/",
+  hood: "https://robinhoodchain.blockscout.com/tx/",
   sol: "https://solscan.io/tx/",
   btc: "https://mempool.space/tx/",
   near: "https://nearblocks.io/txns/",

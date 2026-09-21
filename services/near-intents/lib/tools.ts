@@ -91,11 +91,13 @@ const FLOW_EXPLAINER = {
     'Pass "$USER_ADDRESS" as `from` for the connected wallet. EVM→EVM proceeds default to the same address on the destination chain; for non-EVM destinations (Solana, Bitcoin, NEAR…) ALWAYS ask the user for the recipient address — never guess.',
     "A typical conversation: user asks \"move 50 USDC from Base to Arbitrum\" → quote (confirm numbers) → build_swap (user signs the deposit) → submit_deposit_tx (after confirmation) → await_completion → show the delivery transaction.",
   ],
-  not_this_service: [
-    "Robinhood Chain (chain id 4663) is NOT reachable through NEAR Intents — it is not in the supported-chain list, and no route to it exists here. NEVER quote, build, or promise a swap to or from Robinhood Chain.",
-    "How money actually reaches Robinhood Chain: in Yeetful chat, just ask for the end action ('Buy $10 of AAPL') — the funding planner builds LiFi legs from Base/Ethereum/Arbitrum USDC/ETH straight to USDG/gas on Robinhood Chain in seconds. ETH can also move over the canonical Arbitrum bridge (the robinhood MCP's bridge tools; deposits ~minutes, withdrawals ~7 days).",
-    "Rule of thumb: majors ↔ majors (Base, Arbitrum, Ethereum, Solana, …) = this service. Anything ↔ Robinhood Chain = the funding planner / robinhood MCP, never this one.",
+  robinhood_chain: [
+    'Robinhood Chain (chain id 4663, 1Click identifier "hood") IS reachable here since 2026-09-21. Listed assets: USDG, USDe, ETH, WETH and a couple of community tokens — call `tokens` with chain "hood" for the live list.',
+    "The tokenized STOCKS (AAPL, TSLA, …) are NOT listed. A stock buy is two steps: bring USDG to Robinhood Chain here, then swap on Robinhood Chain (the robinhood MCP). Never promise a one-step cross-chain stock buy.",
+    "Routes INTO native ETH / WETH on Robinhood Chain have quoted \"No liquidity available\" since launch (USDG and the way OUT of the chain quote fine). Always `quote` first; if ETH-in has no liquidity, gas ETH reaches Robinhood Chain through Pantessa's funding planner (a LiFi leg) or the robinhood MCP's canonical bridge.",
+    "Leaving Robinhood Chain (USDG or ETH → Base/Ethereum/Arbitrum/…) settles in about half a minute here — the canonical bridge's withdrawal takes ~7 days.",
   ],
+
   safety: [
     "Deposit addresses are single-use and expire at the quote deadline — never reuse one, never send after expiry.",
     "Send exactly the quoted amount: less is refunded after the deadline, excess is refunded after the swap.",
@@ -145,7 +147,7 @@ export function registerNearIntentsTools(server: Server): void {
           chains: rows,
           note: "Any listed asset can swap to any other, including across chains. Call `tokens` to search what's swappable on a given chain.",
           not_listed_means_unreachable:
-            "A chain absent from this list (notably Robinhood Chain, 4663) has NO route here — don't improvise one. Money reaches Robinhood Chain via Yeetful's funding planner (LiFi legs) or the robinhood MCP's canonical bridge, never via NEAR Intents.",
+            "A chain absent from this list has NO route here — don't improvise one. Robinhood Chain is listed as \"hood\"; its stock tokens are not swappable here (bring USDG over, then swap on Robinhood Chain).",
         };
       }),
   );
