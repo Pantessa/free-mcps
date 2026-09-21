@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { queries, resolveCoin, clip, clearMetaCaches, buildSpotMaps } from "@/lib/hyperliquid";
+import {
+  queries,
+  resolveCoin,
+  clip,
+  clearMetaCaches,
+  buildSpotMaps,
+  availableToTradeUsd,
+  freeSpotUsdc,
+  spotBacksPerps,
+} from "@/lib/hyperliquid";
 
 // ── Canned fixtures (shapes mirror the live API, probed 2026-07-06) ─────────
 
@@ -55,7 +64,13 @@ const FIXTURES: Record<string, unknown> = {
     ],
     time: 1783339058257,
   },
-  spotClearinghouseState: { balances: [{ coin: "HYPE", token: 2, total: "100", hold: "0", entryNtl: "4000" }] },
+  spotClearinghouseState: {
+    balances: [
+      { coin: "HYPE", token: 2, total: "100", hold: "0", entryNtl: "4000" },
+      { coin: "USDC", token: 0, total: "251.31635", hold: "128.541356", entryNtl: "0.0" },
+    ],
+  },
+  userAbstraction: "default",
   portfolio: [
     ["day", { accountValueHistory: [[1, "4900"], [2, "5000.5"]], pnlHistory: [[1, "-10"], [2, "90.5"]], vlm: "25000" }],
     ["perpDay", { accountValueHistory: [[2, "5000.5"]], pnlHistory: [[2, "90.5"]], vlm: "25000" }],
@@ -201,10 +216,82 @@ describe("portfolio", () => {
     };
     expect(data.perp.accountValueUsd).toBe("5000.5");
     expect(data.perp.positions).toHaveLength(1);
-    expect(data.spot.balances).toHaveLength(1);
+    expect(data.spot.balances).toHaveLength(2);
     expect(data.pnl.day).toMatchObject({ accountValue: "5000.5", pnl: "90.5" });
     expect(data.pnl.allTime.pnl).toBe("1500");
     expect(data.pnl.perpDay).toBeUndefined();
+  });
+
+  it("a classic account trades against its perp withdrawable, and says so", async () => {
+    const r = await queries.portfolio({ user: "0x" + "a".repeat(40) }, opts);
+    const d = r.data as {
+      accountMode: string | null;
+      perp: { withdrawableUsd: string; availableToTradeUsd: string; collateralNote?: string };
+    };
+    expect(d.accountMode).toBe("default");
+    // Spot USDC is free here ($122.77) but must NOT count: a classic account's
+    // spot wallet does not back perp margin.
+    expect(d.perp.withdrawableUsd).toBe("3800.5");
+    expect(d.perp.availableToTradeUsd).toBe("3800.5");
+    expect(d.perp.collateralNote).toBeUndefined();
+  });
+
+  it("a unified account reads free spot USDC, not the swept-to-zero withdrawable", async () => {
+    // Live shape of the 2026-09-21 wallet: perps fully funded, withdrawable 0.
+    const savedMode = FIXTURES.userAbstraction;
+    const savedPerp = FIXTURES.clearinghouseState;
+    FIXTURES.userAbstraction = "unifiedAccount";
+    FIXTURES.clearinghouseState = { ...(savedPerp as object), withdrawable: "0.0" };
+    try {
+      const r = await queries.portfolio({ user: "0x" + "a".repeat(40) }, opts);
+      const d = r.data as {
+        accountMode: string;
+        perp: { withdrawableUsd: string; availableToTradeUsd: string; collateralNote?: string };
+      };
+      expect(d.accountMode).toBe("unifiedAccount");
+      expect(d.perp.withdrawableUsd).toBe("0.0"); // kept verbatim for compatibility
+      expect(d.perp.availableToTradeUsd).toBe("122.774994"); // 251.31635 − 128.541356
+      expect(d.perp.collateralNote).toContain("availableToTradeUsd");
+    } finally {
+      FIXTURES.userAbstraction = savedMode;
+      FIXTURES.clearinghouseState = savedPerp;
+    }
+  });
+
+  it("falls back to withdrawable when the account mode can't be read", async () => {
+    const saved = FIXTURES.userAbstraction;
+    delete FIXTURES.userAbstraction; // the mock answers 500 → accountMode null
+    try {
+      const r = await queries.portfolio({ user: "0x" + "a".repeat(40) }, opts);
+      const d = r.data as { accountMode: string | null; perp: { availableToTradeUsd: string } };
+      expect(d.accountMode).toBeNull();
+      expect(d.perp.availableToTradeUsd).toBe("3800.5");
+    } finally {
+      FIXTURES.userAbstraction = saved;
+    }
+  });
+});
+
+describe("availableToTradeUsd", () => {
+  it("only lets spot USDC back perps in unified / portfolio-margin modes", () => {
+    for (const mode of ["unifiedAccount", "portfolioMargin"]) {
+      expect(spotBacksPerps(mode)).toBe(true);
+      expect(availableToTradeUsd({ perpWithdrawable: "0.0", accountMode: mode, spotUsdcFree: 124 })).toBe(124);
+    }
+    expect(spotBacksPerps("default")).toBe(false);
+    expect(availableToTradeUsd({ perpWithdrawable: "0.0", accountMode: "default", spotUsdcFree: 124 })).toBe(0);
+  });
+
+  it("never reads below withdrawable, and never goes negative", () => {
+    expect(availableToTradeUsd({ perpWithdrawable: "500", accountMode: "unifiedAccount", spotUsdcFree: 10 })).toBe(500);
+    expect(availableToTradeUsd({ perpWithdrawable: "-3", accountMode: "unifiedAccount", spotUsdcFree: null })).toBe(0);
+    expect(availableToTradeUsd({ perpWithdrawable: null })).toBe(0);
+  });
+
+  it("reads free spot USDC as total − hold, and ignores other tokens", () => {
+    expect(freeSpotUsdc({ balances: [{ coin: "USDC", total: "251.31635", hold: "128.541356" }] })).toBeCloseTo(122.774994, 6);
+    expect(freeSpotUsdc({ balances: [{ coin: "HYPE", total: "100", hold: "0" }] })).toBeNull();
+    expect(freeSpotUsdc(null)).toBeNull();
   });
 });
 
