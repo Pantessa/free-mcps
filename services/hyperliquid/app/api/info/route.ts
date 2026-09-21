@@ -16,7 +16,7 @@ export async function GET() {
       { name: "orderbook", description: "L2 book with best bid/ask, spread, depth." },
       { name: "candles", description: "OHLCV history for any coin + interval." },
       { name: "funding", description: "Funding history + predicted next rate vs Binance/Bybit." },
-      { name: "portfolio", description: "Account view for an address: positions, margin, spot balances, PnL." },
+      { name: "portfolio", description: "Account view for an address: positions, margin, collateral available to trade, spot balances, PnL." },
       { name: "open_orders", description: "An address's resting orders (incl. trigger/TP-SL detail)." },
       { name: "fills", description: "Executed trades with PnL + fees, time-boundable." },
       { name: "order_status", description: "One order's status by oid/cloid." },

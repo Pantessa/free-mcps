@@ -17,7 +17,7 @@ export default function Home() {
       <ul style={{ color: "#cdd3df" }}>
         <li>markets / spot_markets / price — live prices, 24h stats, OI, funding, leverage</li>
         <li>orderbook / candles / funding — L2 depth, OHLCV, funding vs Binance &amp; Bybit</li>
-        <li>portfolio — positions, margin, spot balances, PnL for any address</li>
+        <li>portfolio — positions, margin, collateral available to trade, spot balances, PnL for any address</li>
         <li>open_orders / fills / order_status / ledger — the account&apos;s full activity</li>
         <li>await_settlement — WebSocket watch that returns the moment an order settles</li>
         <li>info_query — read-only escape hatch to the full /info surface</li>

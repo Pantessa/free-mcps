@@ -8,6 +8,9 @@ import { awaitSettlement } from "../lib/watch";
 
 // Default probe address: the HLP vault (public, always exists).
 const USER = process.argv[2] ?? "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303";
+// A wallet running in unified-account mode (perp collateral held in spot USDC)
+// — the shape `withdrawableUsd` alone gets wrong. Override with argv[3].
+const UNIFIED_USER = process.argv[3] ?? "0x66268791b55e1f5fa585d990326519f101407257";
 
 let failures = 0;
 
@@ -62,8 +65,34 @@ async function main() {
 
   await check(`portfolio (${USER.slice(0, 10)}…)`, async () => {
     const r = await queries.portfolio({ user: USER });
-    const d = dig<{ perp: { accountValueUsd: string | null; positions: unknown[] } }>(r);
-    return { pass: r.ok && d.perp.accountValueUsd !== null, detail: `accountValue $${d.perp.accountValueUsd}, ${d.perp.positions.length} positions` };
+    const d = dig<{
+      accountMode: string | null;
+      perp: { accountValueUsd: string | null; withdrawableUsd: string | null; availableToTradeUsd: string; positions: unknown[] };
+    }>(r);
+    // availableToTradeUsd is the honest collateral figure — on a unified
+    // account withdrawableUsd reads ~0 while the account is fully funded.
+    const available = Number(d.perp.availableToTradeUsd);
+    return {
+      pass: r.ok && d.perp.accountValueUsd !== null && Number.isFinite(available) && available >= Number(d.perp.withdrawableUsd ?? 0),
+      detail: `accountValue $${d.perp.accountValueUsd}, ${d.perp.positions.length} positions, mode=${d.accountMode}, withdrawable $${d.perp.withdrawableUsd} → available $${d.perp.availableToTradeUsd}`,
+    };
+  });
+
+  await check(`unified-account collateral (${UNIFIED_USER.slice(0, 10)}…)`, async () => {
+    // A wallet observed in unified mode on 2026-09-21. If it ever leaves that
+    // mode the check still passes (the invariant holds in every mode) — the
+    // printed detail is what tells you which path was exercised.
+    const r = await queries.portfolio({ user: UNIFIED_USER });
+    const d = dig<{ accountMode: string | null; perp: { withdrawableUsd: string | null; availableToTradeUsd: string; collateralNote?: string } }>(r);
+    const available = Number(d.perp.availableToTradeUsd);
+    const withdrawable = Number(d.perp.withdrawableUsd ?? 0);
+    // Invariant in every mode: available ≥ withdrawable, and whenever spot is
+    // doing the backing the payload must say so.
+    const noteWhenNeeded = available <= withdrawable || !!d.perp.collateralNote;
+    return {
+      pass: r.ok && Number.isFinite(available) && available >= withdrawable && noteWhenNeeded,
+      detail: `mode=${d.accountMode}, withdrawable $${d.perp.withdrawableUsd} → available $${d.perp.availableToTradeUsd}${d.perp.collateralNote ? " (+note)" : ""}`,
+    };
   });
 
   await check("open_orders + fills", async () => {

@@ -161,7 +161,7 @@ export function registerHyperliquidTools(server: Server): void {
     {
       title: "Account Portfolio",
       description:
-        "Full Hyperliquid account view for an address: perp positions (size, entry, liquidation px, unrealized PnL, leverage), margin + withdrawable USDC, spot balances, and day/week/month/all-time PnL. THE tool for 'what are my positions' / 'how is my account doing'.",
+        "Full Hyperliquid account view for an address: perp positions (size, entry, liquidation px, unrealized PnL, leverage), margin + collateral, spot balances, and day/week/month/all-time PnL. THE tool for 'what are my positions' / 'how is my account doing'. For 'how much can I trade with', read `perp.availableToTradeUsd`, NOT `perp.withdrawableUsd`: on a unified account (`accountMode` = \"unifiedAccount\", also portfolio margin) collateral lives in spot USDC and `withdrawableUsd` reads ~0 while the account is fully funded.",
       inputSchema: { user: userArg },
     },
     async ({ user }) => present(await queries.portfolio({ user })),

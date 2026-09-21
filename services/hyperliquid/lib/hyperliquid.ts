@@ -231,6 +231,48 @@ export async function resolveCoin(
   return null;
 }
 
+// ── Account collateral ──────────────────────────────────────────────────────
+//
+// `clearinghouseState.withdrawable` is NOT an account's tradable collateral.
+// On a unified account (`userAbstraction` = "unifiedAccount"; portfolio margin
+// behaves the same) the venue keeps collateral in SPOT USDC and sweeps the perp
+// ledger down to the margin in use, so that field reads ~$0 — or a stale figure
+// between sweeps — for a fully funded account. Measured 2026-09-21 on a live
+// unified wallet: withdrawable "0.0" while $122 of free spot USDC backed an
+// open $385 position. Classic accounts return "default" and are unaffected.
+
+/** Free spot USDC (total − hold) from a `spotClearinghouseState` payload. */
+export function freeSpotUsdc(spotState: unknown): number | null {
+  const balances = (spotState as { balances?: { coin?: string; total?: string; hold?: string }[] } | null)?.balances;
+  const usdc = (balances ?? []).find((b) => b?.coin === "USDC");
+  if (!usdc) return null;
+  const free = Number(usdc.total) - Number(usdc.hold ?? 0);
+  return Number.isFinite(free) ? free : null;
+}
+
+/** Account modes in which spot USDC backs perp margin. */
+export function spotBacksPerps(accountMode: string | null | undefined): boolean {
+  return accountMode === "unifiedAccount" || accountMode === "portfolioMargin";
+}
+
+/** The collateral a trade can actually draw on: the best finite figure of the
+ *  perp ledger's `withdrawable` and — only when the mode lets spot back perps
+ *  — free spot USDC. Never less than `withdrawable`. */
+export function availableToTradeUsd(input: {
+  perpWithdrawable?: string | number | null;
+  accountMode?: string | null;
+  spotUsdcFree?: number | null;
+}): number {
+  const candidates = [Number(input.perpWithdrawable)];
+  if (spotBacksPerps(input.accountMode)) candidates.push(Number(input.spotUsdcFree));
+  return Math.max(0, ...candidates.filter((n) => Number.isFinite(n)));
+}
+
+/** Money as the venue writes it: up to 6 decimals, no trailing zeros. */
+function fmtUsd(n: number): string {
+  return String(Number(n.toFixed(6)));
+}
+
 // ── Typed query wrappers (the curated tool surface) ─────────────────────────
 
 export const queries = {
@@ -432,10 +474,13 @@ export const queries = {
    * and per-period PnL. This is the "$USER_ADDRESS portfolio" tool.
    */
   portfolio: async (args: { user: string }, opts?: HlOpts): Promise<HlResult> => {
-    const [perp, spot, series] = await Promise.all([
+    const [perp, spot, series, abstraction] = await Promise.all([
       infoRequest({ type: "clearinghouseState", user: args.user }, opts),
       infoRequest({ type: "spotClearinghouseState", user: args.user }, opts),
       infoRequest({ type: "portfolio", user: args.user }, opts),
+      // Fail-soft: an unreadable mode just means we fall back to the perp
+      // ledger's own `withdrawable`, which is what this tool always said.
+      infoRequest({ type: "userAbstraction", user: args.user }, opts).catch(() => null),
     ]);
     if (!perp.ok) return perp;
     const perpState = perp.data as {
@@ -459,16 +504,31 @@ export const queries = {
       // Keep the headline periods; perp* variants are near-duplicates.
       pnl = Object.fromEntries(Object.entries(pnl).filter(([k]) => !k.startsWith("perp")));
     }
+    const accountMode = typeof abstraction?.data === "string" ? abstraction.data : null;
+    const spotUsdcFree = spot.ok ? freeSpotUsdc(spot.data) : null;
+    const available = availableToTradeUsd({
+      perpWithdrawable: perpState.withdrawable,
+      accountMode,
+      spotUsdcFree,
+    });
     return {
       ok: true,
       status: 200,
       data: {
         user: args.user,
+        accountMode,
         perp: {
           accountValueUsd: perpState.marginSummary?.accountValue ?? null,
           totalMarginUsedUsd: perpState.marginSummary?.totalMarginUsed ?? null,
           totalNotionalUsd: perpState.marginSummary?.totalNtlPos ?? null,
           withdrawableUsd: perpState.withdrawable ?? null,
+          availableToTradeUsd: fmtUsd(available),
+          ...(spotBacksPerps(accountMode) && available > Number(perpState.withdrawable ?? 0)
+            ? {
+                collateralNote:
+                  "This account keeps its perp collateral in SPOT USDC, so `withdrawableUsd` reads ~0 while the account is funded. Size trades against `availableToTradeUsd`.",
+              }
+            : {}),
           positions: (perpState.assetPositions ?? []).map((p) => p.position),
         },
         spot: {
