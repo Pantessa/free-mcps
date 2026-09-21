@@ -325,7 +325,26 @@ export interface QuoteParams {
   deadlineMin: number;
   /** Optional integrator fee, already validated. */
   appFees?: AppFee[] | null;
+  /** Confidential Intents level, already validated. Absent = public. */
+  confidentiality?: Confidentiality | null;
 }
+
+/** NEAR Confidential Intents: the swap executes on NEAR's private shard, so
+ *  the route between the deposit and the payout is off the public record. The
+ *  deposit transfer and the destination payout themselves stay public. */
+export const CONFIDENTIALITY_LEVELS = ["basic", "advanced"] as const;
+export type Confidentiality = (typeof CONFIDENTIALITY_LEVELS)[number];
+
+/** "public" and absent both mean the default lane (null). Anything else must
+ *  be a level 1Click names — a typo must never quietly build a public swap. */
+export function validateConfidentiality(v?: string | null): Confidentiality | null {
+  if (v == null || v === "" || v === "public") return null;
+  if ((CONFIDENTIALITY_LEVELS as readonly string[]).includes(v)) return v as Confidentiality;
+  throw new Error(`confidentiality must be one of: public, ${CONFIDENTIALITY_LEVELS.join(", ")}.`);
+}
+
+export const CONFIDENTIAL_NOTE =
+  "Confidential execution hides the route between the deposit and the payout. The deposit transfer on the origin chain and the payout on the destination chain are still public, so delivering to the same address that paid is easy to match by amount and timing — pass a different recipient for real privacy. Refunds always return to the paying address.";
 
 /** POST /v0/quote — EXACT_INPUT, origin-chain deposit, destination-chain delivery. */
 export async function requestQuote(p: QuoteParams, opts?: OneClickOpts): Promise<OneClickResult> {
@@ -348,6 +367,7 @@ export async function requestQuote(p: QuoteParams, opts?: OneClickOpts): Promise
         deadline: new Date(Date.now() + p.deadlineMin * 60_000).toISOString(),
         referral: "yeetful",
         ...(p.appFees?.length ? { appFees: p.appFees } : {}),
+        ...(p.confidentiality ? { confidentiality: p.confidentiality } : {}),
       },
     },
     opts,
