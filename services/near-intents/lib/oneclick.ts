@@ -359,7 +359,7 @@ export function validateConfidentiality(v?: string | null): Confidentiality | nu
 }
 
 export const CONFIDENTIAL_NOTE =
-  "Confidential execution hides the route between the deposit and the payout. The deposit transfer on the origin chain and the payout on the destination chain are still public, so delivering to the same address that paid is easy to match by amount and timing — pass a different recipient for real privacy. Refunds always return to the paying address.";
+  "Confidential execution hides the route between the deposit and the payout. The deposit transfer on the origin chain and the payout on the destination chain are still public, so delivering to the same address that paid is easy to match by amount and timing — pass a different recipient for real privacy. Refunds always return to the paying address. HEADS UP (measured 2026-09-22): a confidential quote prices and echoes its level for every size and route asked, and the swap can still fail at execution — two live $1 USDC Base→Ethereum swaps were REFUNDED with refundReason INTENT_SUBMIT_FAILED about a minute after the deposit landed, and no confidential fill has been observed. NEAR's own changelog says Confidential Intents is invite-only and needs the integration enabled first (partners.near-intents.org), and that confidential-relay solvers are allowlisted and must pre-shield liquidity. Treat a confidential build as unproven until one settles: tell the user a refund is likely and that it lands on the ORIGIN chain.";
 
 /** POST /v0/quote — EXACT_INPUT, origin-chain deposit, destination-chain delivery. */
 export async function requestQuote(p: QuoteParams, opts?: OneClickOpts): Promise<OneClickResult> {

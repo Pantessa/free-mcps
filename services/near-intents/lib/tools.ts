@@ -82,7 +82,7 @@ const confidentialityArg = z
   .enum(["public", "basic", "advanced"])
   .optional()
   .describe(
-    'Optional. "basic" or "advanced" runs the swap through NEAR Confidential Intents (a private shard): the route between the deposit and the payout stays off the public record, at the same speed and near-identical price. Only set it when the USER asked for a private/confidential swap. The deposit and the payout are still public transfers, so for real privacy the user should also give a `recipient` that is not the paying wallet — say so. Default "public".',
+    'Optional. "basic" or "advanced" runs the swap through NEAR Confidential Intents (a private shard): the route between the deposit and the payout stays off the public record, at the same speed and near-identical price. Only set it when the USER asked for a private/confidential swap — and tell them it is UNPROVEN: as of 2026-09-22 every confidential swap we have executed was refunded (INTENT_SUBMIT_FAILED) about a minute after the deposit landed, with the money returning on the ORIGIN chain. The deposit and the payout are still public transfers, so for real privacy the user should also give a `recipient` that is not the paying wallet — say so. Default "public".',
   );
 
 const FLOW_EXPLAINER = {
