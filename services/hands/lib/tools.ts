@@ -40,16 +40,46 @@ const CAPABILITIES = [
   "Aave supply/withdraw/borrow/repay, Lido staking, NFT transfers + Seaport listings, Snapshot DAO votes",
 ];
 
+/** Where an agent that holds its OWN key and its OWN money goes instead. This
+ *  service is the human-handoff front door by design — it returns sentences
+ *  and links and nothing else — so the one honest thing it can do for a
+ *  self-signing agent is name the surface that serves legs, and name it
+ *  precisely enough to connect without a docs round trip. */
+const DESK_URL = `${SITE}/api/broker/mcp`;
+const AGENT_SIGNED = {
+  url: DESK_URL,
+  transport: "streamable-http",
+  when: "You hold the wallet AND the key, and the ask is SEQUENCED (fund → wait for arrival → act). Anything a human should sign stays here.",
+  loop: [
+    "broker_open  — your plain sentence + your wallet + agent_key (your desk identity); returns the quote, the funding verdict, and route options.",
+    "broker_choose — optional, repeatable: pick a funding route; it rewrites the working sentence and the desk re-quotes.",
+    "broker_execute — one personal_sign over the desk's consent text proves the wallet; the ask compiles into a job owned by it.",
+    "broker_next — the leg the runner is offering: what it does in a sentence, its kind (tx | txChain | hlAction | hlBatch | order), chain, notional, how long it stays signable, and the guarded artifact itself.",
+    "broker_done — post what you signed; it records the leg, rolls the runner forward, and answers with the next one.",
+    "… repeat next/done per leg, then broker_status for the funnel.",
+  ],
+  contract:
+    "Round-trip across every settlement boundary, batched within one. A wait leg verifies on-chain arrival before the next leg is built, and same-chain work (approve → swap) arrives as one ordered chain. Pantessa still writes every transaction deterministically and guard-checks it fail-closed at offer time; your key is the only thing that signs, and legs are served only to the agent_key the intent was opened with.",
+};
+
+/** The capability map, as data. Exported so the test suite can pin the
+ *  contract this service publishes — a stale contract misdescribes the
+ *  product to every agent that reads it (the exact bug M2 fixed). */
+export function capabilitiesPayload() {
+  return {
+    capabilities: CAPABILITIES,
+    contract:
+      "Pantessa is the non-custodial back office for autonomous money: deterministic builders construct every transaction (no AI writes calldata or addresses), every build is guarded fail-closed, priced, and receipted, and only a wallet signature moves anything. Your job as the agent: scan (scan_wallet), decide what should happen, then mint a sign link (prepare_handoff / plan_stock_buy) and hand it to your human — or PUBLISH the plan as a durable, shareable intent link (mint_intent_link, needs your operator's yf_ API key). If the wallet and the key are YOURS, don't hand anything off: the desk MCP's agent-signed path (see `agentSigned`) compiles the ask into a sequenced job and serves you one guarded leg at a time.",
+    handoff: `Sign links look like ${SITE}/sign?ask=<sentence>, or a durable ${SITE}/i/<slug> intent link — the ask travels as a sentence and is rebuilt from scratch on Pantessa's side.`,
+    desk: `This service is fire-and-forget: you plan, you hand off, you're done. If you want a stateful negotiation loop that TALKS BACK — funding routes, and a broker_status feedback loop that tells you when your human actually signed — connect the Pantessa desk MCP at ${DESK_URL} (broker_open → broker_choose → broker_handoff → broker_status).`,
+    agentSigned: AGENT_SIGNED,
+  };
+}
+
 /** The capability-map handler, shared by the current tool name and the
  *  back-compat alias. */
 async function capabilitiesHandler() {
-  return guarded(() => ({
-    capabilities: CAPABILITIES,
-    contract:
-      "Pantessa is the non-custodial back office for autonomous money: deterministic builders construct every transaction (no AI writes calldata or addresses), every build is guarded fail-closed, priced, and receipted, and the human's own wallet is the only signer. Your job as the agent: scan (scan_wallet), decide what should happen, then mint a sign link (prepare_handoff / plan_stock_buy) and hand it to your human — or PUBLISH the plan as a durable, shareable intent link (mint_intent_link, needs your operator's yf_ API key).",
-    handoff: `Sign links look like ${SITE}/sign?ask=<sentence>, or a durable ${SITE}/i/<slug> intent link — the ask travels as a sentence and is rebuilt from scratch on Pantessa's side.`,
-    desk: `This service is fire-and-forget: you plan, you hand off, you're done. If you want a stateful negotiation loop that TALKS BACK — funding routes, and a broker_status feedback loop that tells you when your human actually signed — connect the Pantessa desk MCP at ${SITE}/api/broker/mcp instead.`,
-  }));
+  return guarded(() => capabilitiesPayload());
 }
 
 /** Register the hands (agent-handoff) tool surface. */
@@ -94,7 +124,9 @@ export function registerHandsTools(server: Server): void {
     {
       title: "Mint the Sign Link (any ask)",
       description:
-        "Turn ANY ask Pantessa can build (see what_pantessa_can_do) into the ONE link you hand your human: a pantessa.com/sign page showing the ask and the guardrail contract, flowing into the guarded build + their wallet's signature. Phrase the ask as a complete plain-English sentence with amounts and tokens ('Buy $12 of AAPL', 'Swap $5 of ETH to USDC on Base', 'Buy $10 of AAPL every week'). The link carries the sentence only — no calldata, no addresses — and nothing happens until the human acts.",
+        "Turn ANY ask Pantessa can build (see what_pantessa_can_do) into the ONE link you hand your human: a pantessa.com/sign page showing the ask and the guardrail contract, flowing into the guarded build + their wallet's signature. Phrase the ask as a complete plain-English sentence with amounts and tokens ('Buy $12 of AAPL', 'Swap $5 of ETH to USDC on Base', 'Buy $10 of AAPL every week'). The link carries the sentence only — no calldata, no addresses — and nothing happens until the human acts. USE THIS WHEN A HUMAN OWNS THE WALLET. If the wallet and the key are your OWN, there is nobody to hand off to: connect the desk MCP at " +
+        DESK_URL +
+        " (streamable-http) and run broker_open → broker_execute → broker_next / broker_done — it compiles your ask into a sequenced job and serves you one guarded, signable leg at a time, round-tripping across every settlement boundary and batching within one.",
       inputSchema: {
         ask: z.string().min(3).max(400).describe("The action as one plain-English sentence, amounts included."),
         agent: z.string().max(40).optional().describe('Who prepared this — shown on the sign page byline (e.g. "Claude").'),
