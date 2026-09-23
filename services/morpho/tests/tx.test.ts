@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { decodeFunctionData } from "viem";
 import { MORPHO_ABI, TOKEN_ABI, setRpcForTests } from "@/lib/chain";
 import { MORPHO_SINGLETON } from "@/lib/registry";
-import { builds, type SendTransactionAction } from "@/lib/tx";
+import { approveNeedsReset, builds, type SendTransactionAction } from "@/lib/tx";
 import { fakeClient, type FakeCall } from "./fake-rpc";
 
 const USER = "0x1111111111111111111111111111111111111111" as const;
@@ -12,9 +12,11 @@ const WETH = { address: "0x4200000000000000000000000000000000000006" as const, s
 
 const nowSec = () => BigInt(Math.floor(Date.now() / 1000));
 
-const isUsdc = (c: FakeCall) => c.address.toLowerCase() === USDC.address.toLowerCase();
+const USDT_MAINNET = "0xdAC17F958D2ee523a2206206994597C13D831ec7" as const;
 
 interface MarketFakeOpts {
+  /** The market's loan token (default Base USDC). Its balance/allowance ride the `usdc*` knobs. */
+  loanToken?: `0x${string}`;
   usdcBalance?: bigint;
   usdcAllowance?: bigint;
   wethBalance?: bigint;
@@ -23,10 +25,12 @@ interface MarketFakeOpts {
 
 /** USDC/WETH market (1000 supplied / 600 borrowed, lltv 77%, WETH at $300). */
 function marketFake(opts: MarketFakeOpts = {}) {
+  const loan = (opts.loanToken ?? USDC.address).toLowerCase();
+  const isUsdc = (c: FakeCall) => c.address.toLowerCase() === loan;
   return fakeClient({
     reads: {
       idToMarketParams: {
-        loanToken: USDC.address,
+        loanToken: opts.loanToken ?? USDC.address,
         collateralToken: WETH.address,
         oracle: "0x00000000000000000000000000000000000000A1",
         irm: "0x46415998764C29aB2a25CbeA6254146D50D22687",
@@ -90,6 +94,40 @@ describe("build_lend", () => {
     setRpcForTests(marketFake({ usdcBalance: 200_000_000n, usdcAllowance: 500_000_000n }));
     const res = await builds.lend({ chainId: 8453, user: USER, marketId: MARKET_ID, amount: "100" });
     expect(stepsOf(res.data)).toHaveLength(1);
+  });
+
+  // Ethereum USDT's approve() reverts on a non-zero → non-zero change. A
+  // repay-max approve leaves dust behind, so a partial allowance is ordinary.
+  const approveArgs = (s: SendTransactionAction) => decodeFunctionData({ abi: TOKEN_ABI, data: s.tx.data as `0x${string}` }).args;
+  it("USDT on Ethereum, partial allowance: reset to zero, then the exact approve, then the supply", async () => {
+    setRpcForTests(marketFake({ loanToken: USDT_MAINNET, usdcBalance: 200_000_000n, usdcAllowance: 10_000_000n }));
+    const res = await builds.lend({ chainId: 1, user: USER, marketId: MARKET_ID, amount: "100" });
+    expect(res.ok).toBe(true);
+    const steps = stepsOf(res.data);
+    expect(steps).toHaveLength(3);
+    expect(approveArgs(steps[0])).toEqual([MORPHO_SINGLETON, 0n]);
+    expect(approveArgs(steps[1])).toEqual([MORPHO_SINGLETON, 100_000_000n]);
+    for (const s of steps.slice(0, 2)) expect(s.tx).toMatchObject({ to: USDT_MAINNET, value: "0", chainId: 1 });
+    expect(decodeFunctionData({ abi: MORPHO_ABI, data: steps[2].tx.data as `0x${string}` }).functionName).toBe("supply");
+  });
+
+  it("USDT on Ethereum, no allowance: one exact approve; enough allowance: none", async () => {
+    setRpcForTests(marketFake({ loanToken: USDT_MAINNET, usdcBalance: 200_000_000n, usdcAllowance: 0n }));
+    const none = stepsOf((await builds.lend({ chainId: 1, user: USER, marketId: MARKET_ID, amount: "100" })).data);
+    expect(none).toHaveLength(2);
+    expect(approveArgs(none[0])).toEqual([MORPHO_SINGLETON, 100_000_000n]);
+    setRpcForTests(marketFake({ loanToken: USDT_MAINNET, usdcBalance: 200_000_000n, usdcAllowance: 100_000_000n }));
+    expect(stepsOf((await builds.lend({ chainId: 1, user: USER, marketId: MARKET_ID, amount: "100" })).data)).toHaveLength(1);
+  });
+
+  it("an ordinary token with a partial allowance still gets ONE approve (no reset)", async () => {
+    setRpcForTests(marketFake({ usdcBalance: 200_000_000n, usdcAllowance: 10_000_000n }));
+    const steps = stepsOf((await builds.lend({ chainId: 8453, user: USER, marketId: MARKET_ID, amount: "100" })).data);
+    expect(steps).toHaveLength(2);
+    expect(approveArgs(steps[0])).toEqual([MORPHO_SINGLETON, 100_000_000n]);
+    // The reset set is keyed by chain: the mainnet USDT address on Base is just another token.
+    expect(approveNeedsReset(8453, USDT_MAINNET)).toBe(false);
+    expect(approveNeedsReset(1, USDT_MAINNET.toLowerCase())).toBe(true);
   });
 
   it("refuses over-balance honestly", async () => {

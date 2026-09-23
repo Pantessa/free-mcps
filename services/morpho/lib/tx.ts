@@ -74,22 +74,56 @@ const balanceOf = (chainId: SupportedChainId, token: Address, owner: Address): P
 const allowanceOf = (chainId: SupportedChainId, token: Address, owner: Address, spender: Address): Promise<bigint> =>
   readRetry(() => rpcFor(chainId).readContract({ address: token, abi: TOKEN_ABI, functionName: "allowance", args: [owner, spender] }));
 
-/** An exact-amount ERC-20 approve step — only when the live allowance is short. */
-async function approveStepIfNeeded(
+/**
+ * Tokens whose approve() REVERTS when the live allowance and the new amount
+ * are both non-zero. Measured on a fork, not guessed: Ethereum's USDT is the
+ * one such token among the assets this service meets (Base's bridged
+ * stables, USDC, DAI, WETH and WBTC all take a non-zero → non-zero change).
+ * A repay-max approve is buffered ~0.05% over the debt, so it routinely
+ * LEAVES a dust allowance — the next USDT lend or repay would then revert at
+ * its approve, after the user signed it.
+ */
+const APPROVE_RESET_TOKENS: Partial<Record<SupportedChainId, readonly string[]>> = {
+  1: ["0xdac17f958d2ee523a2206206994597c13d831ec7"], // USDT
+};
+
+export const approveNeedsReset = (chainId: SupportedChainId, token: string): boolean =>
+  (APPROVE_RESET_TOKENS[chainId] ?? []).includes(token.toLowerCase());
+
+/**
+ * The exact-amount ERC-20 approve step(s) — none when the live allowance
+ * covers the amount; on a reset token with a partial allowance, an
+ * approve(spender, 0) first.
+ */
+async function approveStepsIfNeeded(
   chainId: SupportedChainId,
   asset: AssetMeta,
   owner: Address,
   spender: Address,
   atoms: bigint,
   spenderName: string,
-): Promise<SendTransactionAction | null> {
+): Promise<SendTransactionAction[]> {
   const allowance = await allowanceOf(chainId, asset.address, owner, spender);
-  if (allowance >= atoms) return null;
-  return step(
-    `Approve ${asset.symbol}`,
-    `Allow ${spenderName} to pull exactly ${formatAtoms(atoms, asset.decimals)} ${asset.symbol}.`,
-    { to: asset.address, data: encodeFunctionData({ abi: TOKEN_ABI, functionName: "approve", args: [spender, atoms] }), chainId },
+  if (allowance >= atoms) return [];
+  const approveData = (amount: bigint) => encodeFunctionData({ abi: TOKEN_ABI, functionName: "approve", args: [spender, amount] });
+  const steps: SendTransactionAction[] = [];
+  if (allowance > 0n && approveNeedsReset(chainId, asset.address)) {
+    steps.push(
+      step(
+        `Clear the old ${asset.symbol} allowance`,
+        `${asset.symbol} refuses to change an allowance that is already set, so the older, smaller one to ${spenderName} is cleared first.`,
+        { to: asset.address, data: approveData(0n), chainId },
+      ),
+    );
+  }
+  steps.push(
+    step(
+      `Approve ${asset.symbol}`,
+      `Allow ${spenderName} to pull exactly ${formatAtoms(atoms, asset.decimals)} ${asset.symbol}.`,
+      { to: asset.address, data: approveData(atoms), chainId },
+    ),
   );
+  return steps;
 }
 
 interface LoadedMarket {
@@ -301,7 +335,7 @@ export const builds = {
       if (atoms > balance) {
         return fail(400, `Insufficient ${m.loan.symbol}: lending ${args.amount} but the wallet holds ${formatAtoms(balance, m.loan.decimals)} on ${m.chainName}. Nothing was built.`);
       }
-      const approve = await approveStepIfNeeded(args.chainId, m.loan, args.user, m.morpho, atoms, "Morpho");
+      const approves = await approveStepsIfNeeded(args.chainId, m.loan, args.user, m.morpho, atoms, "Morpho");
       const supply = step(
         `Lend ${m.loan.symbol}`,
         `Supply ${args.amount} ${m.loan.symbol} to the Morpho ${m.label} market on ${m.chainName} — starts earning the market's supply APY immediately.`,
@@ -318,7 +352,7 @@ export const builds = {
         market: m.label,
         marketId: m.id,
         amount: `${args.amount} ${m.loan.symbol}`,
-        steps: [approve, supply].filter(Boolean),
+        steps: [...approves, supply],
         submit_with: submitWith(`the ${m.loan.symbol} is supplied and earning — track it with \`position\`.`),
       });
     } catch (e) {
@@ -337,7 +371,7 @@ export const builds = {
       if (atoms > balance) {
         return fail(400, `Insufficient ${m.collateral.symbol}: posting ${args.amount} but the wallet holds ${formatAtoms(balance, m.collateral.decimals)} on ${m.chainName}. Nothing was built.`);
       }
-      const approve = await approveStepIfNeeded(args.chainId, m.collateral, args.user, m.morpho, atoms, "Morpho");
+      const approves = await approveStepsIfNeeded(args.chainId, m.collateral, args.user, m.morpho, atoms, "Morpho");
       const post = step(
         `Post ${m.collateral.symbol} collateral`,
         `Deposit ${args.amount} ${m.collateral.symbol} as collateral in the Morpho ${m.label} market on ${m.chainName} (collateral does not earn interest; it unlocks borrowing ${m.loan.symbol}).`,
@@ -354,7 +388,7 @@ export const builds = {
         market: m.label,
         marketId: m.id,
         amount: `${args.amount} ${m.collateral.symbol}`,
-        steps: [approve, post].filter(Boolean),
+        steps: [...approves, post],
         submit_with: submitWith(`the collateral is posted — build_borrow can now draw ${m.loan.symbol} against it.`),
       });
     } catch (e) {
@@ -432,7 +466,7 @@ export const builds = {
         if (approveAtoms > balance) {
           return fail(400, `Full repayment needs ~${formatAtoms(approveAtoms, m.loan.decimals)} ${m.loan.symbol} (debt + drift buffer) but the wallet holds ${formatAtoms(balance, m.loan.decimals)}. Repay a smaller amount or top up first.`);
         }
-        const approve = await approveStepIfNeeded(args.chainId, m.loan, args.user, m.morpho, approveAtoms, "Morpho");
+        const approves = await approveStepsIfNeeded(args.chainId, m.loan, args.user, m.morpho, approveAtoms, "Morpho");
         const repay = step(
           `Repay all ${m.loan.symbol}`,
           `Repay the entire ${formatAtoms(pos.debt, m.loan.decimals)} ${m.loan.symbol} debt in the Morpho ${m.label} market on ${m.chainName} (repaid by shares, so it clears exactly).`,
@@ -449,7 +483,7 @@ export const builds = {
           market: m.label,
           marketId: m.id,
           amount: `all (~${formatAtoms(pos.debt, m.loan.decimals)} ${m.loan.symbol})`,
-          steps: [approve, repay].filter(Boolean),
+          steps: [...approves, repay],
           note: "The approval includes a ~0.05% buffer for interest accruing before you sign; any unused allowance stays as dust.",
           submit_with: submitWith("the debt is cleared — collateral can then be withdrawn with build_withdraw_collateral."),
         });
@@ -463,7 +497,7 @@ export const builds = {
       if (atoms > balance) {
         return fail(400, `Insufficient ${m.loan.symbol}: repaying ${args.amount} but the wallet holds ${formatAtoms(balance, m.loan.decimals)} on ${m.chainName}. Nothing was built.`);
       }
-      const approve = await approveStepIfNeeded(args.chainId, m.loan, args.user, m.morpho, atoms, "Morpho");
+      const approves = await approveStepsIfNeeded(args.chainId, m.loan, args.user, m.morpho, atoms, "Morpho");
       const repay = step(
         `Repay ${m.loan.symbol}`,
         `Repay ${args.amount} ${m.loan.symbol} of the ${formatAtoms(pos.debt, m.loan.decimals)} ${m.loan.symbol} debt in the Morpho ${m.label} market on ${m.chainName}.`,
@@ -480,7 +514,7 @@ export const builds = {
         market: m.label,
         marketId: m.id,
         amount: `${args.amount} ${m.loan.symbol}`,
-        steps: [approve, repay].filter(Boolean),
+        steps: [...approves, repay],
         submit_with: submitWith("the debt shrinks and the health factor improves — check `position`."),
       });
     } catch (e) {
