@@ -107,6 +107,7 @@ export function quoteFixture(args: { dry: boolean; amountIn?: string; withMemo?:
       minAmountOut: "539550",
       timeEstimate: 60,
       withdrawFee: "3000",
+      refundFee: "2400",
     },
   };
 }

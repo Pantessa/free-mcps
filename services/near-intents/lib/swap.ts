@@ -136,6 +136,14 @@ export function presentQuote(args: {
     ...(q.withdrawFee && q.withdrawFee !== "0"
       ? { destinationDeliveryFee: `${formatAtoms(q.withdrawFee, destination.decimals)} ${destination.symbol} (already included in the estimate)` }
       : {}),
+    // What a REFUND costs, in the origin token. A swap that can't be filled
+    // sends the deposit back on the ORIGIN chain minus this — so a caller
+    // that never shows it leaves the user watching a destination balance
+    // that will never move. Echoed verbatim from the quote; absent when the
+    // venue quotes no refund fee.
+    ...(q.refundFee && q.refundFee !== "0"
+      ? { originRefundFee: `${formatAtoms(q.refundFee, origin.decimals)} ${origin.symbol}` }
+      : {}),
     etaSeconds: q.timeEstimate,
     summary: `Swap ${q.amountInFormatted} ${origin.symbol} on ${chainLabel(origin.blockchain)} → ~${q.amountOutFormatted} ${destination.symbol} on ${chainLabel(destination.blockchain)} (min ${formatAtoms(q.minAmountOut, destination.decimals)} after ${slippageBps / 100}% slippage, ETA ~${q.timeEstimate}s after deposit confirms)`,
   };

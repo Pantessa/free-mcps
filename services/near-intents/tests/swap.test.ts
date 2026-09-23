@@ -259,6 +259,31 @@ describe("app fees", () => {
   });
 });
 
+describe("refund cost", () => {
+  it("names what a refund costs in the ORIGIN token — the number a caller must show before the signature", async () => {
+    const f = mockFetch(tokensHandler, quoteHandler(quoteFixture({})));
+    const r = await buildSwap(
+      { originChain: "base", originToken: "USDC", destinationChain: "arbitrum", destinationToken: "USDC", amount: "0.55", from: FROM },
+      { fetchImpl: f },
+    );
+    // A refund lands on the origin chain, so it is priced in the origin
+    // token — never the destination's withdraw fee.
+    expect(r.quote.originRefundFee).toBe("0.0024 USDC");
+    expect(r.quote.destinationDeliveryFee).toContain("0.003 USDC");
+  });
+
+  it("omits the field when the venue quotes no refund fee", async () => {
+    const fx = quoteFixture({});
+    delete (fx.quote as Record<string, unknown>).refundFee;
+    const f = mockFetch(tokensHandler, quoteHandler(fx));
+    const r = await buildSwap(
+      { originChain: "base", originToken: "USDC", destinationChain: "arbitrum", destinationToken: "USDC", amount: "0.55", from: FROM },
+      { fetchImpl: f },
+    );
+    expect(r.quote.originRefundFee).toBeUndefined();
+  });
+});
+
 describe("confidential swaps", () => {
   const args = {
     originChain: "base",
